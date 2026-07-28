@@ -315,8 +315,12 @@ $ErrorActionPreference = 'Continue'
 try {
   $out = & pi install $PkgRef 2>&1
   $out | Where-Object { $_ -match '^\s*(Installed|Installing)' } | ForEach-Object { Ok ($_ -replace '\s+$', '') }
-  # -notmatch on an array filters instead of returning a bool; negate -match.
-  if (-not ($out -match 'Installed')) { Warn "pi install did not confirm; run 'pi list' to check." }
+  # Confirm against `pi list` rather than the install transcript: pi interleaves
+  # its own stdout with git's stderr, so the "Installed" line is not reliably
+  # present in what we captured even on success.
+  $listed = & pi list 2>&1 | Where-Object { $_ -match [regex]::Escape($PkgRef) }
+  if ($listed) { Ok "confirmed registered" }
+  else { Warn "$PkgRef not showing in 'pi list' -- check settings.json packages[]" }
 } finally {
   $ErrorActionPreference = $prev
   $global:LASTEXITCODE = 0
