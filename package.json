@@ -1,0 +1,27 @@
+{
+  "name": "my-smart-pi",
+  "version": "0.1.0",
+  "description": "Shareable Pi harness package: tapered context, lazy tool loading, vault autoindexing, and tool-output pruning.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "llm",
+    "agent",
+    "vault",
+    "context-management"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsima/my-smart-pi.git"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/*.ts"
+    ]
+  }
+}

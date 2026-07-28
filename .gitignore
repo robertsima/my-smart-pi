@@ -1,0 +1,18 @@
+# local pi/package installs
+node_modules/
+.pi/
+
+# local config with paths/secrets
+my-smart-pi.config.json
+*.local.json
+.env
+
+# generated state / indexes / archives
+.vault-mind/
+.lancedb/
+collections/
+tool-output-archive/
+
+# logs / temp
+*.log
+.DS_Store

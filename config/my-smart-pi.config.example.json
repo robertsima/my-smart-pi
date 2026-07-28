@@ -1,0 +1,24 @@
+{
+  "vaultAutoindex": {
+    "vaultRoot": "D:/Vault",
+    "watchRoots": [
+      "Vault Mind",
+      "AI Mind"
+    ],
+    "vaultMindConfigPath": ".vault-mind/vault-mind.config.json",
+    "statePath": ".vault-mind/autoindex-state.json",
+    "defaultCollection": "notes",
+    "collections": [
+      "notes",
+      "projects"
+    ],
+    "collectionRules": [
+      {
+        "pattern": "^(AI Mind|Vault Mind)/Projects/",
+        "collection": "projects"
+      }
+    ],
+    "debounceMs": 2000,
+    "maxChunkChars": 1500
+  }
+}
