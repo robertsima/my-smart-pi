@@ -46,7 +46,9 @@ type Config = Required<Pick<RawConfig, "watchRoots" | "collectionRules" | "colle
 type State = { files: Record<string, { mtimeMs: number; chunks: number }> };
 
 const agentDir = () =>
-  process.env.PI_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME || process.cwd(), ".pi", "agent");
+  process.env.PI_CODING_AGENT_DIR ||
+  process.env.PI_AGENT_DIR ||
+  path.join(process.env.USERPROFILE || process.env.HOME || process.cwd(), ".pi", "agent");
 
 const readJsonIfExists = (file: string): any | undefined => {
   try {

@@ -30,7 +30,9 @@ type Config = {
 };
 
 const agentDir = () =>
-  process.env.PI_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME || process.cwd(), ".pi", "agent");
+  process.env.PI_CODING_AGENT_DIR ||
+  process.env.PI_AGENT_DIR ||
+  path.join(process.env.USERPROFILE || process.env.HOME || process.cwd(), ".pi", "agent");
 
 const readJsonIfExists = (file: string): any | undefined => {
   try {

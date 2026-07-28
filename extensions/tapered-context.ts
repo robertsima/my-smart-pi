@@ -30,10 +30,14 @@ const SUMMARY_FOCUS = [
   "If previous summary exists, merge it without expanding stale detail. Current active work and unresolved risks matter most.",
 ].join(" ");
 
-const TOOL_OUTPUT_ARCHIVE_ROOT = join(
-  process.env.PI_AGENT_DIR || join(process.env.USERPROFILE || process.env.HOME || process.cwd(), ".pi", "agent"),
-  "tool-output-archive",
-);
+const TOOL_OUTPUT_ARCHIVE_ROOT =
+  process.env.PI_TOOL_OUTPUT_ARCHIVE_DIR ||
+  join(
+    process.env.PI_CODING_AGENT_DIR ||
+      process.env.PI_AGENT_DIR ||
+      join(process.env.USERPROFILE || process.env.HOME || process.cwd(), ".pi", "agent"),
+    "tool-output-archive",
+  );
 
 const TOOL_STUB_PREFIX = "[Tool output archived]";
 
