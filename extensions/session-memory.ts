@@ -385,20 +385,24 @@ export default async function (pi: any) {
     return await searchHybridRanked(cfg.dataDir, collection, query, Math.min(Math.max(limit, 1), 20), vmCfg(cfg));
   };
 
-  const archiveSettled = async (ctx: any) => {
+  // Everything archiveSettled needs, read off ctx while ctx is still valid.
+  type SettledSnapshot = {
+    sessionFile: string;
+    branch: any[];
+    sessionId: string;
+    sessionName?: string;
+    cwd: string;
+  };
+
+  const archiveSettled = async (snap: SettledSnapshot) => {
     if (!cfg.enabled || !cfg.archive.enabled) return;
-    const sm = ctx?.sessionManager;
-    const sessionFile = sm?.getSessionFile?.() ?? `memory:${sm?.getSessionId?.() ?? "ephemeral"}`;
-    const branch = sm?.getBranch?.() ?? [];
+    const { sessionFile, branch, sessionId, sessionName, cwd } = snap;
     const messageEntries = branch.filter((e: any) => e?.type === "message" && e.message && !isRecallMessage(e.message));
     const turns = groupMessageTurns(messageEntries, (e: any) => e.message?.role);
     if (turns.length <= cfg.archive.headTurns + cfg.archive.tailTurns) return;
 
     const middleTurns = turns.slice(cfg.archive.headTurns, Math.max(cfg.archive.headTurns, turns.length - cfg.archive.tailTurns));
     const chunks = chunkTurnsForArchive(middleTurns, cfg);
-    const sessionId = sm?.getSessionId?.() ?? hash(sessionFile);
-    const sessionName = sm?.getSessionName?.();
-    const cwd = sm?.getCwd?.() ?? ctx?.cwd ?? "";
 
     let stored = 0;
     for (const entries of chunks) {
@@ -432,8 +436,30 @@ export default async function (pi: any) {
     if (stored) log(`archived ${stored} chunk(s) from ${slash(cwd)}`);
   };
 
+  // The archive runs behind a promise queue, so by the time it executes the
+  // session may have been replaced (newSession/fork/switchSession/reload) and a
+  // captured ctx would throw "extension ctx is stale". Read what we need off ctx
+  // synchronously here and hand the deferred work a plain snapshot. getBranch()
+  // in particular must be read now -- reading it late would archive whatever
+  // session replaced this one.
   pi.on("agent_settled", async (_event: any, ctx: any) => {
-    archiveQueue = archiveQueue.then(() => archiveSettled(ctx)).catch((e) => log(`archive error: ${e?.message ?? e}`));
+    if (!cfg.enabled || !cfg.archive.enabled) return;
+    let snap: SettledSnapshot;
+    try {
+      const sm = ctx?.sessionManager;
+      const sessionFile = sm?.getSessionFile?.() ?? `memory:${sm?.getSessionId?.() ?? "ephemeral"}`;
+      snap = {
+        sessionFile,
+        branch: sm?.getBranch?.() ?? [],
+        sessionId: sm?.getSessionId?.() ?? hash(sessionFile),
+        sessionName: sm?.getSessionName?.(),
+        cwd: sm?.getCwd?.() ?? ctx?.cwd ?? "",
+      };
+    } catch (e: any) {
+      log(`archive snapshot error: ${e?.message ?? e}`);
+      return;
+    }
+    archiveQueue = archiveQueue.then(() => archiveSettled(snap)).catch((e) => log(`archive error: ${e?.message ?? e}`));
     await archiveQueue;
   });
 

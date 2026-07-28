@@ -17,8 +17,13 @@
   settings.json is merged, never overwritten -- your provider, model, auth
   and context prefs are preserved. A timestamped backup is written first.
 
+  Machine-specific paths are not baked into this script. They come from
+  bootstrap.local.json (gitignored) next to this file, or from parameters, or
+  from an interactive prompt on first run. Answers are saved back to
+  bootstrap.local.json so later runs are zero-argument.
+
 .PARAMETER VaultRoot
-  Obsidian vault root. Default D:\Vault.
+  Obsidian vault root, e.g. D:\Vault.
 
 .PARAMETER AllowPaths
   Extra directories guardrails may touch, on top of the vault, the Pi agent
@@ -34,6 +39,9 @@
 .PARAMETER SkipNpm
   Skip the npm install step.
 
+.PARAMETER Reconfigure
+  Ignore saved answers and prompt again.
+
 .EXAMPLE
   .\bootstrap.ps1
 .EXAMPLE
@@ -41,11 +49,12 @@
 #>
 [CmdletBinding()]
 param(
-  [string]   $VaultRoot      = 'D:\Vault',
-  [string[]] $AllowPaths     = @('D:\Development'),
-  [string]   $ReadOnlySubdir = 'Vault Mind',
-  [string]   $Ref            = 'main',
-  [switch]   $SkipNpm
+  [string]   $VaultRoot,
+  [string[]] $AllowPaths,
+  [string]   $ReadOnlySubdir,
+  [string]   $Ref = 'main',
+  [switch]   $SkipNpm,
+  [switch]   $Reconfigure
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,6 +62,46 @@ $ErrorActionPreference = 'Stop'
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "    $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "    ! $m" -ForegroundColor Yellow }
+
+# --------------------------------------------------------- saved answers
+# Keeps personal paths out of Git while still making re-runs zero-argument.
+$LocalCfgPath = Join-Path $PSScriptRoot 'bootstrap.local.json'
+$saved = $null
+if ((Test-Path $LocalCfgPath) -and -not $Reconfigure) {
+  try { $saved = Get-Content $LocalCfgPath -Raw | ConvertFrom-Json }
+  catch { Warn "Could not parse bootstrap.local.json; ignoring it." }
+}
+
+function Resolve-Setting {
+  param($Explicit, $SavedValue, [string]$Prompt, $Default)
+  # Explicit parameter wins, then the saved answer, then ask.
+  if ($PSBoundParameters.ContainsKey('Explicit') -and $Explicit) { return $Explicit }
+  if ($null -ne $SavedValue -and "$SavedValue" -ne '') { return $SavedValue }
+  $hint = if ($Default) { " [$Default]" } else { '' }
+  $ans = Read-Host "    $Prompt$hint"
+  if (-not $ans) { return $Default }
+  return $ans
+}
+
+$VaultRoot = Resolve-Setting -Explicit $VaultRoot -SavedValue $saved.vaultRoot `
+  -Prompt 'Vault root' -Default (Join-Path $HOME 'Vault')
+
+if (-not $AllowPaths) {
+  if ($saved -and $saved.PSObject.Properties['allowPaths']) {
+    $AllowPaths = @($saved.allowPaths)
+  } else {
+    $raw = Read-Host '    Extra allowed dirs, comma-separated (blank for none)'
+    $AllowPaths = if ($raw) { $raw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } } else { @() }
+  }
+}
+
+if (-not $PSBoundParameters.ContainsKey('ReadOnlySubdir')) {
+  if ($saved -and $saved.PSObject.Properties['readOnlySubdir']) {
+    $ReadOnlySubdir = $saved.readOnlySubdir
+  } else {
+    $ReadOnlySubdir = Read-Host '    Vault subdir to keep read-only (blank for none)'
+  }
+}
 
 $AgentDir  = Join-Path $HOME '.pi\agent'
 $ExtDir    = Join-Path $AgentDir 'extensions'
@@ -272,6 +321,15 @@ try {
   $ErrorActionPreference = $prev
   $global:LASTEXITCODE = 0
 }
+
+# ------------------------------------------------------------ 7. save answers
+Step 'Saving answers'
+Write-Json $LocalCfgPath ([ordered]@{
+  vaultRoot      = $VaultRoot
+  allowPaths     = @($AllowPaths)
+  readOnlySubdir = $ReadOnlySubdir
+})
+Ok "bootstrap.local.json (gitignored) -- re-run with no arguments to reapply"
 
 Write-Host ''
 Write-Host 'Done.' -ForegroundColor Green

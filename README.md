@@ -42,6 +42,11 @@ cd my-smart-pi
 .\bootstrap.ps1
 ```
 
+On first run it asks for your vault root, any extra directories Pi should be
+allowed to touch, and which vault subdirectory to keep read-only. Answers are
+saved to `bootstrap.local.json` (gitignored), so every later run is
+zero-argument. Use `-Reconfigure` to change them.
+
 `bootstrap.ps1` is idempotent — re-run it after a Pi reinstall, on a new
 machine, or whenever `settings.json` has drifted. It does the four things
 `pi install` alone does **not** do:
@@ -56,14 +61,15 @@ machine, or whenever `settings.json` has drifted. It does the four things
 `settings.json` is **merged, never overwritten** — provider, model, auth and
 context prefs are preserved, and a timestamped `.bak-` copy is written first.
 
-Options:
+Options (all optional — these override the saved answers):
 
 ```powershell
-.\bootstrap.ps1 -VaultRoot D:\Vault `
-                -AllowPaths D:\Development,C:\work `
-                -ReadOnlySubdir 'Vault Mind' `
+.\bootstrap.ps1 -VaultRoot <VAULT_ROOT> `
+                -AllowPaths <DIR>,<DIR> `
+                -ReadOnlySubdir <SUBDIR> `
                 -Ref main `
-                -SkipNpm
+                -SkipNpm `
+                -Reconfigure
 ```
 
 ### Manual / non-Windows
@@ -102,6 +108,8 @@ If older copies of included extensions exist in `~/.pi/agent/extensions`, disabl
   `Unexpected token '﻿'`.
 - `pi-llama-switch` shells out to `pgrep`, which does not exist on Windows; the
   resulting console noise is harmless but llama-server detection won't work.
+- `[pi-vault-mind] Port 11435 in use` means an earlier Pi process is still
+  running and holding the vault-mind HTTP server. Indexing still works.
 
 ## Package contents
 
