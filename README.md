@@ -110,6 +110,12 @@ If older copies of included extensions exist in `~/.pi/agent/extensions`, disabl
   resulting console noise is harmless but llama-server detection won't work.
 - `[pi-vault-mind] Port 11435 in use` means an earlier Pi process is still
   running and holding the vault-mind HTTP server. Indexing still works.
+- `[session-memory] archive snapshot error: ... ctx is stale` under `pi -p` is a
+  shutdown race, not a config problem. Pi's `dispose()` invalidates the
+  extension ctx, and in `-p` the session is disposed before `agent_settled`
+  lands, so the ctx is already invalid when the handler runs. Interactive
+  sessions await the handler while the ctx is live. `pi -p` is a poor smoke test
+  for this harness generally — it also trips "Agent is already processing".
 
 ## Package contents
 
