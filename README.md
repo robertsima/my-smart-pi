@@ -219,6 +219,31 @@ Use when working outside the vault cwd but needing configured vault-mind collect
 
 Included extension provides global archived session memory tooling. It stores generated session-memory state locally under the user's Pi agent directory, not in this repo.
 
+Automatic session recall is **disabled by default** to avoid provider prompt-cache misses from changing retrieved chunks every turn. Use explicit recall when needed:
+
+```text
+/session-memory search <query>
+session_recall(query="...", limit=3)
+```
+
+To re-enable automatic recall locally, edit:
+
+```text
+~/.pi/agent/session-memory/config.json
+```
+
+Set:
+
+```json
+{
+  "context": {
+    "recall": true,
+    "recallLimit": 3,
+    "recallMaxChars": 2500
+  }
+}
+```
+
 ## Guardrails
 
 `config/guardrails/guardrails.example.json` shows sanitized path access and read-only source-note policy. Copy it into the location expected by `@aliou/pi-guardrails` and replace placeholders:

@@ -125,9 +125,12 @@ const defaultConfig = (): Config => {
       minTurns: 14,
       headTurns: 1,
       tailTurns: 8,
-      recall: true,
-      recallLimit: 5,
-      recallMaxChars: 7000,
+      // Keep automatic recall disabled by default to preserve provider prompt-cache
+      // stability. Manual tools (/session-memory search, session_recall) remain
+      // available when older session context is needed.
+      recall: false,
+      recallLimit: 3,
+      recallMaxChars: 2500,
     },
     // Same default embedder you currently use for vault notes, but data lives
     // in the separate global session-memory store.
