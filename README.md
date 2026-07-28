@@ -34,29 +34,74 @@ Review extensions before installing. Pi extensions run with local user permissio
 
 Recommended after branch lands on `main`:
 
+### Windows: one command
+
+```powershell
+git clone https://github.com/robertsima/my-smart-pi.git
+cd my-smart-pi
+.\bootstrap.ps1
+```
+
+`bootstrap.ps1` is idempotent — re-run it after a Pi reinstall, on a new
+machine, or whenever `settings.json` has drifted. It does the four things
+`pi install` alone does **not** do:
+
+| Step | Why it matters |
+|---|---|
+| writes `~/.pi/agent/extensions/guardrails.json` | `@aliou/pi-guardrails` resolves its config to `<agentDir>/extensions/guardrails.json`. With no file it falls back to onboarding and blocks paths. **This is the usual cause of "pi lost its permissions" after a reinstall.** |
+| writes `~/.pi/agent/my-smart-pi.config.json` | `vault-autoindex.ts` and `global-vault-collections.ts` will not find the vault without it |
+| pins `apache-arrow` to `18.1.0` | LanceDB tables written under arrow 18 fail to open against arrow 21, which npm otherwise resolves |
+| prunes dead `extensions[]` paths from `settings.json` | absolute paths left over from a pre-package layout are load errors at startup |
+
+`settings.json` is **merged, never overwritten** — provider, model, auth and
+context prefs are preserved, and a timestamped `.bak-` copy is written first.
+
+Options:
+
+```powershell
+.\bootstrap.ps1 -VaultRoot D:\Vault `
+                -AllowPaths D:\Development,C:\work `
+                -ReadOnlySubdir 'Vault Mind' `
+                -Ref main `
+                -SkipNpm
+```
+
+### Manual / non-Windows
+
 ```bash
 pi install git:github.com/robertsima/my-smart-pi@main
 ```
 
-Current working branch:
-
-```bash
-pi install git:github.com/robertsima/my-smart-pi@harness-package
-```
-
-Or from local checkout:
+Or from a local checkout:
 
 ```bash
 pi install /path/to/my-smart-pi
 ```
 
-Then reload Pi:
+Then copy `config/guardrails/guardrails.example.json` to
+`~/.pi/agent/extensions/guardrails.json` and
+`config/my-smart-pi.config.example.json` to `~/.pi/agent/my-smart-pi.config.json`,
+replacing the `<PLACEHOLDER>` paths. Then reload Pi:
 
 ```text
 /reload
 ```
 
+Verify with `pi list` — you should see `git:github.com/robertsima/my-smart-pi@main`
+alongside the npm packages.
+
 If older copies of included extensions exist in `~/.pi/agent/extensions`, disable/remove duplicates before installing this package. Duplicate extension names can register duplicate hooks/tools.
+
+### Gotchas
+
+- **Never copy an old `settings.json` over a new install.** It overwrites the
+  `packages[]` entry `pi install` just wrote, and re-introduces absolute
+  `extensions[]` paths that no longer exist. Run `bootstrap.ps1` instead.
+- **Write config as UTF-8 without BOM.** PowerShell 5.1's
+  `Set-Content -Encoding utf8` emits a BOM and Pi's JSON parser rejects it with
+  `Unexpected token '﻿'`.
+- `pi-llama-switch` shells out to `pgrep`, which does not exist on Windows; the
+  resulting console noise is harmless but llama-server detection won't work.
 
 ## Package contents
 
