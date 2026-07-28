@@ -1,0 +1,45 @@
+{
+  "$schema": "https://unpkg.com/@aliou/pi-guardrails@0.15.0/schema.json",
+  "applyBuiltinDefaults": true,
+  "features": {
+    "pathAccess": true,
+    "policies": true
+  },
+  "pathAccess": {
+    "mode": "block",
+    "allowedPaths": [
+      {
+        "kind": "directory",
+        "path": "<YOUR_VAULT_ROOT>"
+      },
+      {
+        "kind": "directory",
+        "path": "<YOUR_PI_AGENT_DIR>"
+      },
+      {
+        "kind": "directory",
+        "path": "<YOUR_NODE_OR_NPM_DIR>"
+      }
+    ]
+  },
+  "policies": {
+    "rules": [
+      {
+        "id": "vault-source-read-only",
+        "name": "User-authored vault source read-only",
+        "description": "Allow reading user-authored notes but prevent modifications.",
+        "patterns": [
+          {
+            "pattern": "<YOUR_VAULT_ROOT>/<USER_AUTHORED_NOTES_DIR>"
+          },
+          {
+            "pattern": "<YOUR_VAULT_ROOT>/<USER_AUTHORED_NOTES_DIR>/**"
+          }
+        ],
+        "protection": "readOnly",
+        "onlyIfExists": false,
+        "enabled": true
+      }
+    ]
+  }
+}

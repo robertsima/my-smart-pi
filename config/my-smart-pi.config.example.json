@@ -1,6 +1,6 @@
 {
   "vaultAutoindex": {
-    "vaultRoot": "D:/Vault",
+    "vaultRoot": "<YOUR_VAULT_ROOT>",
     "watchRoots": [
       "Vault Mind",
       "AI Mind"
@@ -20,5 +20,10 @@
     ],
     "debounceMs": 2000,
     "maxChunkChars": 1500
+  },
+  "globalVaultCollections": {
+    "vaultRoot": "<YOUR_VAULT_ROOT>",
+    "vaultMindConfigPath": ".vault-mind/vault-mind.config.json",
+    "promptLabel": "main vault"
   }
 }
