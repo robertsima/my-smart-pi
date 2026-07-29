@@ -236,19 +236,31 @@ which never gets written to your session log. Search your sessions and you'll
 only find the agent's own replies, so it looks like it's imagining things. And
 because it's re-applied every turn, restarting doesn't help.
 
-The fix is already in your `settings.json` if you've run `bootstrap.ps1`:
+The fix goes in your `packages` list, turning the `pi-vault-mind` entry from a
+plain string into an object. `bootstrap.ps1` does this for you:
 
 ```jsonc
-"skills": [
-  "!vault-mind-broadcaster",
-  "!vault-mind-heavy-lifter",
-  "!vault-mind-manager",
-  "!vault-mind-miner"
+"packages": [
+  {
+    "source": "npm:pi-vault-mind",
+    "skills": [
+      "!vault-mind-broadcaster",
+      "!vault-mind-heavy-lifter",
+      "!vault-mind-manager",
+      "!vault-mind-miner"
+    ]
+  }
 ]
 ```
 
 With none of them loaded, nothing gets injected and your agent behaves normally.
 Delete a line if you ever want to use that sub-agent deliberately.
+
+> **It has to go here, not in a top-level `"skills"` list.** That list only
+> controls loose skills you've dropped in `~/.pi/agent/skills/` — it never
+> touches skills that came from an installed package, so putting the patterns
+> there looks right and silently does nothing. Also never use an empty array:
+> pi reads that as "disable every skill in this package".
 
 ### Two traps
 
@@ -260,6 +272,14 @@ list Pi just wrote and points at extensions that no longer exist. Run
 adds one, and Pi's JSON parser chokes on it — then falls back to empty config and
 may overwrite your file with a stub. This is not hypothetical; it ate a working
 `settings.json` during development.
+
+**Don't leave several Pi instances running at once.** `settings.json` was
+observed collapsing from 20 keys to 5 — losing the provider, model, and most of
+`enabledModels` — while more than one Pi process was alive. The likeliest
+explanation is one instance writing its older in-memory config over newer
+changes on disk. Worth knowing before you go hunting for a config bug that isn't
+there. `bootstrap.ps1` backs the file up before every write, so if this bites
+you, the previous version is sitting next to it as `settings.json.bak-<time>`.
 
 ---
 

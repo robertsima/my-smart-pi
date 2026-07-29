@@ -299,9 +299,17 @@ $requiredPkgs = @(
 # run-on entry. A zero-item result collapses to $null, which does the same.
 $pkgs = @()
 if ($s.PSObject.Properties['packages']) { $pkgs = @($s.packages) }
+
+# A package entry is either a plain source string or an object with `source`
+# plus per-resource filters. Always compare on the source, never on the entry --
+# comparing raw values makes an already-filtered object look absent and re-adds
+# it as a duplicate string on every run.
+function Get-PkgSource($entry) { if ($entry -is [string]) { $entry } else { $entry.source } }
+
 # Drop any my-smart-pi entry pinned to a different ref before adding ours.
-$pkgs = @($pkgs | Where-Object { $_ -notlike 'git:github.com/robertsima/my-smart-pi@*' })
-foreach ($p in $requiredPkgs) { if ($pkgs -notcontains $p) { $pkgs = @($pkgs) + $p } }
+$pkgs = @($pkgs | Where-Object { (Get-PkgSource $_) -notlike 'git:github.com/robertsima/my-smart-pi@*' })
+$have = @($pkgs | ForEach-Object { Get-PkgSource $_ })
+foreach ($p in $requiredPkgs) { if ($have -notcontains $p) { $pkgs = @($pkgs) + $p; $have += $p } }
 $s | Add-Member -NotePropertyName packages -NotePropertyValue @($pkgs) -Force
 Ok "packages: $($pkgs.Count) entries (incl. $PkgRef)"
 
@@ -315,32 +323,54 @@ if ($dead.Count) { foreach ($d in $dead) { Warn "pruned missing extension: $d" }
 $s | Add-Member -NotePropertyName extensions -NotePropertyValue @($live) -Force
 
 # pi-vault-mind ships four per-role skills (vault-mind-broadcaster / -heavy-lifter
-# / -manager / -miner). Its identity-injector hooks before_agent_start, scans
-# systemPromptOptions.skills for /^vault-mind-(...)$/ and appends that role's
-# "IDENTITY BOUNDARY" contract to the system prompt. Those skills are meant to be
-# selected one at a time via `--agent vault-mind-<role>`, but a normal install
-# discovers all four, and detectRole returns the FIRST match -- alphabetically
-# vault-mind-broadcaster, the most restrictive of the set. The session is then
-# told it may not run bash/grep/find and may only write under Agent/Presentations/.
-# Exclude-only patterns are safe here: applyPatterns keeps all paths when the
-# include list is empty. Drop these entries to use the role agents deliberately.
-$roleSkills = @(
+# / -manager / -miner). Its identity injector appends that role's "IDENTITY
+# BOUNDARY" contract to the system prompt, telling the session it may not run
+# bash/grep/find and may only write under Agent/Presentations/. Those skills are
+# meant to be picked one at a time via `--agent vault-mind-<role>`; a normal
+# install loads all four and the detector takes the first match -- alphabetically
+# broadcaster, the most restrictive.
+#
+# This MUST be a per-package filter, not the top-level settings "skills" array:
+# that array only governs loose skills under ~/.pi/agent/skills and ~/.agents,
+# never package-provided ones, so putting the patterns there silently does
+# nothing (verified with a before_agent_start probe -- the role skills were still
+# loaded and still matched). A package entry may be an object with `source` plus
+# per-resource-type patterns, which is the only thing that reaches package skills.
+#
+# Never use an empty pattern array here: pi reads that as "disable every skill in
+# this package". Exclude-only patterns are safe -- an empty include list keeps
+# everything else.
+$vmSkillFilter = @(
   '!vault-mind-broadcaster'
   '!vault-mind-heavy-lifter'
   '!vault-mind-manager'
   '!vault-mind-miner'
 )
-$skills = @()
-if ($s.PSObject.Properties['skills']) { $skills = @($s.skills) }
-foreach ($rs in $roleSkills) { if ($skills -notcontains $rs) { $skills = @($skills) + $rs } }
-$s | Add-Member -NotePropertyName skills -NotePropertyValue @($skills) -Force
-Ok "vault-mind role skills excluded (prevents forced identity boundary)"
+$pkgs = @($pkgs | ForEach-Object {
+  $src = if ($_ -is [string]) { $_ } else { $_.source }
+  if ($src -eq 'npm:pi-vault-mind') {
+    [ordered]@{ source = 'npm:pi-vault-mind'; skills = $vmSkillFilter }
+  } else { $_ }
+})
+$s | Add-Member -NotePropertyName packages -NotePropertyValue @($pkgs) -Force
+Ok 'vault-mind role skills filtered (prevents forced identity boundary)'
+
+# A stale top-level "skills" key from an earlier version of this script does
+# nothing but mislead; drop the role patterns if that is all it contains.
+if ($s.PSObject.Properties['skills']) {
+  $leftover = @(@($s.skills) | Where-Object { $_ -notin $vmSkillFilter })
+  if ($leftover.Count) { $s | Add-Member -NotePropertyName skills -NotePropertyValue $leftover -Force }
+  else { $s.PSObject.Properties.Remove('skills'); Warn 'removed ineffective top-level "skills" role patterns' }
+}
 
 # Last line of defence. This script only ever adds or rewrites `packages` and
 # `extensions`; if the object about to be written has lost any other key that
 # was on disk, something upstream corrupted it and writing would destroy the
 # user's provider/model/auth config. Refuse rather than clobber.
-$missing = @($beforeKeys | Where-Object { $s.PSObject.Properties.Name -notcontains $_ })
+# `skills` is exempt because this script deliberately removes it when it holds
+# nothing but the ineffective role patterns an earlier version wrote.
+$ownedKeys = @('packages', 'extensions', 'skills')
+$missing = @($beforeKeys | Where-Object { $s.PSObject.Properties.Name -notcontains $_ -and $_ -notin $ownedKeys })
 if ($missing.Count) {
   throw ("Refusing to write settings.json: would drop $($missing.Count) key(s): $($missing -join ', '). " +
          "Your original is intact at $Settings.bak-$Stamp")
