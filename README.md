@@ -134,11 +134,40 @@ skills/
   obsidian-cli/
   obsidian-markdown/
 config/
-  AGENTS.example.md
-  my-smart-pi.config.example.json
-  settings.example.json
-  guardrails/guardrails.example.json
+  AGENTS.example.md                  # project-level agent instructions
+  APPEND_SYSTEM.example.md           # -> ~/.pi/agent/APPEND_SYSTEM.md
+  guardrails/guardrails.example.json # -> ~/.pi/agent/extensions/guardrails.json
+  model-switcher.example.json        # -> ~/.pi/agent/model-switcher.json
+  models-store.example.json          # -> ~/.pi/agent/models-store.json
+  my-smart-pi.config.example.json    # -> ~/.pi/agent/my-smart-pi.config.json
+  ollama-model-cache.example.json    # -> ~/.pi/agent/ollama-model-cache.json
+  settings.example.json              # merge into ~/.pi/agent/settings.json
+  template/*.jinja                   # -> ~/.pi/agent/template/
 ```
+
+### Config boilerplates
+
+Everything the harness needs in `~/.pi/agent/` has a boilerplate under `config/`,
+so a wiped or partially-deleted agent directory is recoverable with one command.
+`bootstrap.ps1` seeds each file **only when it is absent or has been gutted to
+`{}`** — a file you have already tuned is never overwritten, and anything it does
+replace is backed up first.
+
+This matters because the failure modes are silent and misleading:
+
+| Missing file | How it actually presents |
+|---|---|
+| `model-switcher.json` | `[pi-llama-switch] No config found at ~/.pi/agent/model-switcher.json` |
+| `models-store.json` | model switching does nothing — the catalog is empty, so there is nothing to switch to |
+| `APPEND_SYSTEM.md` | no error at all; the agent silently loses its operating policy and may adopt an unrelated persona from whatever descriptions are in context |
+| `guardrails.json` | paths get denied with no prompt — reads as "pi lost its permissions" |
+
+After a fresh seed, `model-switcher.json` points at `<PATH_TO_GGUF>`. Replace it
+with your real GGUF path before using any `llama-local/*` model. The thread counts
+(`-t 8 -tb 16`) and `-ngl` values are tuned for one machine; adjust to yours.
+
+`auth.json` is deliberately **not** included and never will be — it holds live
+credentials. Back it up yourself; nothing in this repo can regenerate it.
 
 ## Required / recommended Pi packages
 

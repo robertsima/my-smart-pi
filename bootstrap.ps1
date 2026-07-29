@@ -213,6 +213,50 @@ Write-Json $guardPath $guard
 foreach ($p in $allowed) { Ok "allow $p" }
 if ($ReadOnlySubdir) { Ok "read-only $vaultFwd/$ReadOnlySubdir" }
 
+# ------------------------------------------------------- 3b. seed boilerplates
+# These live in the agent dir but are not written by any other step, so if one
+# is deleted the harness breaks in ways that read as unrelated bugs -- a missing
+# model-switcher.json surfaces only as "[pi-llama-switch] No config found", and
+# a missing APPEND_SYSTEM.md silently drops the agent's operating policy.
+# Seed from config/ ONLY when absent: these are hand-tuned once installed.
+Step 'Seeding config boilerplates'
+$seeds = @(
+  @{ Src = 'config\model-switcher.example.json';     Dst = Join-Path $AgentDir 'model-switcher.json' }
+  @{ Src = 'config\APPEND_SYSTEM.example.md';        Dst = Join-Path $AgentDir 'APPEND_SYSTEM.md' }
+  @{ Src = 'config\models-store.example.json';       Dst = Join-Path $AgentDir 'models-store.json' }
+  @{ Src = 'config\ollama-model-cache.example.json'; Dst = Join-Path $AgentDir 'ollama-model-cache.json' }
+)
+foreach ($seed in $seeds) {
+  $src = Join-Path $PSScriptRoot $seed.Src
+  $dst = $seed.Dst
+  $name = Split-Path $dst -Leaf
+  if (-not (Test-Path $src)) { Warn "missing boilerplate in repo: $($seed.Src)"; continue }
+  if (Test-Path $dst) {
+    # An empty JSON object means a previous run or crash gutted it; treat as absent.
+    $body = (Get-Content $dst -Raw -ErrorAction SilentlyContinue)
+    if ($body -and $body.Trim() -notin @('{}', '')) { Ok "kept existing $name"; continue }
+    Copy-Item $dst "$dst.bak-$Stamp" -Force
+    Warn "$name was empty -- reseeding (old copy at $name.bak-$Stamp)"
+  } else {
+    Warn "$name missing -- seeding from boilerplate"
+  }
+  Copy-Item $src $dst -Force
+}
+
+# Jinja chat templates for llama-server. Same rule: never clobber.
+$tplSrc = Join-Path $PSScriptRoot 'config\template'
+$tplDst = Join-Path $AgentDir 'template'
+if (Test-Path $tplSrc) {
+  if (-not (Test-Path $tplDst)) { New-Item -ItemType Directory -Force -Path $tplDst | Out-Null }
+  foreach ($t in Get-ChildItem $tplSrc -File -Filter *.jinja) {
+    $target = Join-Path $tplDst $t.Name
+    if (Test-Path $target) { continue }
+    Copy-Item $t.FullName $target -Force
+    Warn "seeded template/$($t.Name)"
+  }
+}
+if ($seeds.Count) { Ok "model-switcher.json points at <PATH_TO_GGUF> when freshly seeded -- edit it before using llama-local models" }
+
 # --------------------------------------------------------------- 4. settings
 # Merge, never clobber: settings.json holds provider/model/auth/context prefs
 # that this package knows nothing about.

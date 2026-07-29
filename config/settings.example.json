@@ -33,6 +33,6 @@
     "npm:pi-vault-mind",
     "npm:@kylebrodeur/pi-model-discovery",
     "npm:@kylebrodeur/pi-model-router",
-    "git:github.com/robertsima/my-smart-pi@harness-package"
+    "git:github.com/robertsima/my-smart-pi@main"
   ]
 }
