@@ -111,7 +111,7 @@ npm run doctor
 npm test
 ```
 
-- `npm run doctor` checks active Pi package loading, API-provider and local-role bindings, runtime extension synchronization, local switcher paths, package versions, runtime patches, and duplicate extensions.
+- `npm run doctor` checks active Pi package loading, API-provider and local-role bindings, runtime extension synchronization, the exact Lance/Arrow/subagent/UI package tuple, duplicate Arrow runtimes, local switcher paths, nested Fleet patches, and read-only Lance/embedding health.
 - `npm test` runs isolated profile-install tests, including role-boundary rejection, role rendering, extension exclusions, and UTF-8 preservation.
 
 If Pi was already running, run `/reload` or restart it.
@@ -135,7 +135,9 @@ Use Qwen to implement this settled plan.
 Run independent verification before calling this done.
 ```
 
-Parent agent retrieves bounded project memory before delegation. Child prompts receive only relevant findings and source paths. Local child launch starts the configured server through its switch key. `extensions/harness-routing-guard.ts` enforces the one-local-child limit for foreground and background `Agent` calls. Model metadata and resulting changes must be checked before delegated work is accepted.
+Parent agent retrieves bounded project memory before delegation. Child prompts receive only relevant findings and source paths. Only the API planner/lead descriptor can delegate; verifier, implementer, and reviewer descriptors are leaves. Nesting is capped at depth 2. Local child launch starts the configured server through its switch key. `extensions/harness-routing-guard.ts` enforces one `llama-local` child process-wide while API children use the configured concurrency of four. Model metadata and resulting changes must be checked before delegated work is accepted.
+
+The standard compact Pi chrome is used; `pi-open-tui` is removed from generated dependencies and active packages. The single Fleet surface shows the live Agent → Helper → Helper tree with status, model, current tool, turns, tokens, and elapsed time. Use `Tab`/`Shift+Tab` on an empty prompt to cycle rows, `Enter` to open a conversation, or `/fleet` to focus it directly. Existing conversation steer/stop controls remain available.
 
 Detailed contract: [`docs/AGENT_ROUTING.md`](docs/AGENT_ROUTING.md).
 
@@ -170,8 +172,11 @@ Behavior:
 - failed files retain old state and retry on later scans;
 - index signature tracks data directory, embedding settings, chunk size, schema, and collection rules;
 - startup validates vector dimensions and FTS usability even when signature is unchanged;
-- incompatible managed LanceDB tables are dropped safely; restart Pi once when prompted so fresh LanceDB handles rebuild collections;
-- `vault_reindex(force=true)` resets managed tables, then requires that same one-time restart before rebuilding.
+- incompatible managed LanceDB tables are never dropped live; indexing pauses with a rebuild-required message;
+- `vault_reindex(force=true)` requests an explicit offline rebuild and does not mutate tables;
+- one process-global coordinator per canonical Lance data directory owns the watcher and serialized write queue, so nested sessions do not duplicate indexing;
+- startup emits one compact summary (per-file successes require `logLevel: "debug"`);
+- safe public `table.optimize()` maintenance runs only after the configured written-row threshold (`maintenanceMode: "safe"`).
 
 Ask Pi:
 
@@ -190,7 +195,7 @@ Search projects for a known phrase using FTS mode.
 Search both using hybrid mode.
 ```
 
-If vector dimensions changed or required FTS indexes are missing, Pi resets managed tables and reports a restart requirement. Restart Pi, then run changed-note reindex; fresh LanceDB handles rebuild collections. Registry entries advance only after confirmed indexing success.
+If vector dimensions changed or required FTS indexes are missing, Pi reports that an offline rebuild is required and changes nothing. Stop all Pi processes before any manual repair, take a backup, then restart Pi and run changed-note reindex. Registry entries advance only after confirmed indexing success. `npm run doctor` is read-only: it verifies canonical `dataDir`, schemas and 768-vector fields, notes/projects row counts versus autoindex state, FTS metadata/backlog, real vector+FTS queries, the Ollama embedding endpoint/model/dimension, backups, and competing non-empty Lance directories.
 
 ## Common maintenance
 
@@ -208,7 +213,9 @@ Profile owns:
 - generated `subagents.json` entries;
 - package extension filters;
 - marked routing block in `APPEND_SYSTEM.md`;
-- narrowly scoped installed-runtime patches.
+- narrowly scoped installed-runtime patches, including the reproducible `@tintinweb/pi-subagents@0.14.3` patch in `scripts/patch-pi-subagents-0.14.3.mjs`.
+
+Pinned runtime tuple: `pi-vault-mind@0.16.25`, `@lancedb/lancedb@0.33.0`, `apache-arrow@18.1.0`, and `@tintinweb/pi-subagents@0.14.3`. `pi-open-tui` is removed so standard compact Pi chrome loads.
 
 Machine-local model choices remain in `agent-routing.local.json` and `model-switcher.json`; do not commit them.
 

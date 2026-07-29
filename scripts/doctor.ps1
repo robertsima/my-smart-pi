@@ -21,6 +21,35 @@ function Package-Identity([string]$source) {
 try { Pass "Pi $(& pi --version)" } catch { Fail "pi unavailable: $($_.Exception.Message)" }
 try { Pass "Node $(& node --version)" } catch { Fail "node unavailable: $($_.Exception.Message)" }
 
+$expectedTuple = [ordered]@{
+    "pi-vault-mind" = "0.16.25"
+    "@lancedb/lancedb" = "0.33.0"
+    "apache-arrow" = "18.1.0"
+    "@tintinweb/pi-subagents" = "0.14.3"
+}
+foreach ($name in $expectedTuple.Keys) {
+    $packageJson = Join-Path $AgentDir "npm\node_modules\$name\package.json"
+    if (-not (Test-Path -LiteralPath $packageJson)) { Fail "Pinned package missing: $name"; continue }
+    $actual = [string]((Read-Utf8 $packageJson | ConvertFrom-Json).version)
+    if ($actual -eq $expectedTuple[$name]) { Pass "$name $actual" } else { Fail "$name is $actual; expected $($expectedTuple[$name])" }
+}
+try {
+    $arrowTree = (& npm ls --prefix (Join-Path $AgentDir "npm") apache-arrow --all --json 2>&1 | Out-String) | ConvertFrom-Json
+    $arrowVersions = New-Object System.Collections.Generic.List[string]
+    function Find-Arrow($node) {
+        if ($null -eq $node) { return }
+        $dependenciesProperty = $node.PSObject.Properties["dependencies"]
+        if ($null -eq $dependenciesProperty -or $null -eq $dependenciesProperty.Value) { return }
+        foreach ($property in $dependenciesProperty.Value.PSObject.Properties) {
+            if ($property.Name -eq "apache-arrow" -and $property.Value.version) { $arrowVersions.Add([string]$property.Value.version) }
+            Find-Arrow $property.Value
+        }
+    }
+    Find-Arrow $arrowTree
+    $uniqueArrow = @($arrowVersions | Sort-Object -Unique)
+    if ($uniqueArrow.Count -eq 1 -and $uniqueArrow[0] -eq "18.1.0") { Pass "single Apache Arrow runtime 18.1.0" } else { Fail "duplicate/mismatched Apache Arrow runtimes: $($uniqueArrow -join ', ')" }
+} catch { Fail "Apache Arrow dependency check failed: $($_.Exception.Message)" }
+
 $settingsPath = Join-Path $AgentDir "settings.json"
 $routingPath = Join-Path $AgentDir "agent-routing.local.json"
 $subagentsPath = Join-Path $AgentDir "subagents.json"
@@ -57,6 +86,7 @@ if ((Test-Path $settingsPath) -and (Test-Path $routingPath)) {
     foreach ($required in $profile.managedPackages) {
         if ($sources -notcontains [string]$required) { Fail "Managed package missing: $required" }
     }
+    if (@($sources | Where-Object { $_ -like "npm:pi-open-tui@*" }).Count -eq 0) { Pass "pi-open-tui inactive; standard Pi chrome" } else { Fail "pi-open-tui must not be active in settings packages" }
     foreach ($filter in $profile.packageExtensionFilters.PSObject.Properties) {
         $entry = @($settings.packages | Where-Object { (Package-Identity (Source-Of $_)) -eq $filter.Name }) | Select-Object -First 1
         if ($null -eq $entry -or $entry -is [string]) { Fail "Package extension filter missing: $($filter.Name)"; continue }
@@ -81,7 +111,7 @@ if ($runtimeExtensionsMatch) { Pass "installed runtime extensions match source" 
 
 if (Test-Path $subagentsPath) {
     $subagents = Read-Utf8 $subagentsPath | ConvertFrom-Json
-    if ($subagents.maxConcurrent -eq 2 -and $subagents.defaultMaxTurns -eq 18 -and $subagents.toolDescriptionMode -eq "compact") { Pass "bounded compact subagent config" } else { Fail "subagents.json differs from bounded harness profile" }
+    if ($subagents.maxConcurrent -eq $profile.subagents.maxConcurrent -and $subagents.maxSubagentDepth -eq 2 -and $subagents.defaultMaxTurns -eq 18 -and $subagents.toolDescriptionMode -eq "compact" -and $subagents.widgetMode -eq "off") { Pass "bounded compact nested subagent config" } else { Fail "subagents.json differs from bounded harness profile" }
 }
 
 if (Test-Path $routingPath) {
@@ -102,7 +132,18 @@ $llamaSource = Join-Path $AgentDir "npm\node_modules\pi-llama-switch\src\switche
 $llamaIndex = Join-Path $AgentDir "npm\node_modules\pi-llama-switch\src\index.ts"
 $subagentSource = Join-Path $AgentDir "npm\node_modules\@tintinweb\pi-subagents\src\index.ts"
 if ((Test-Path $llamaSource) -and (Get-Content $llamaSource -Raw).Contains("MY_SMART_PI_WINDOWS_PROCESS_SUPPORT") -and (Test-Path $llamaIndex) -and (Get-Content $llamaIndex -Raw).Contains("MY_SMART_PI_WINDOWS_MODEL_DETECTION")) { Pass "Windows local-server patches" } else { Fail "Windows local-server patch missing" }
-if ((Test-Path $subagentSource) -and (Get-Content $subagentSource -Raw).Contains("MY_SMART_PI_STRICT_PINNED_MODEL")) { Pass "strict pinned-model patch" } else { Fail "strict pinned-model patch missing" }
+if ((Test-Path $subagentSource) -and (Get-Content $subagentSource -Raw).Contains("MY_SMART_PI_STRICT_PINNED_MODEL") -and (Get-Content $subagentSource -Raw).Contains("MY_SMART_PI_NESTED_FLEET")) { Pass "strict model + nested Fleet runtime patch" } else { Fail "pi-subagents harness patch missing" }
+
+$configPath = Join-Path $AgentDir "my-smart-pi.config.json"
+if (Test-Path -LiteralPath $configPath) {
+    try {
+        $harnessConfig = Read-Utf8 $configPath | ConvertFrom-Json
+        $vaultRoot = [string]$harnessConfig.vaultAutoindex.vaultRoot
+        if ([string]::IsNullOrWhiteSpace($vaultRoot)) { $vaultRoot = (Get-Location).Path }
+        & node (Join-Path $PSScriptRoot "lance-health.mjs") $vaultRoot
+        if ($LASTEXITCODE -ne 0) { Fail "read-only Lance/embedding health" } else { Pass "read-only Lance/embedding health" }
+    } catch { Fail "read-only Lance health failed: $($_.Exception.Message)" }
+} else { $warnings.Add("Lance health skipped: missing $configPath") }
 
 if (Test-Path $routingPath) {
     $routing = Read-Utf8 $routingPath | ConvertFrom-Json

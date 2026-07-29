@@ -1,12 +1,13 @@
 {
-  "maxConcurrent": 2,
+  "maxConcurrent": 4,
+  "maxSubagentDepth": 2,
   "defaultMaxTurns": 18,
   "graceTurns": 3,
   "defaultJoinMode": "smart",
   "schedulingEnabled": false,
   "scopeModels": true,
   "fleetView": true,
-  "widgetMode": "all",
+  "widgetMode": "off",
   "outputTranscript": true,
   "toolDescriptionMode": "compact",
   "disableDefaultAgents": true

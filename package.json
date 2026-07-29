@@ -22,6 +22,7 @@
   "scripts": {
     "apply-profile": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/apply-harness-profile.ps1",
     "doctor": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/doctor.ps1",
+    "patch-runtime": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/patch-runtime-packages.ps1",
     "test": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-harness-profile.ps1"
   },
   "pi": {

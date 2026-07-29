@@ -209,3 +209,6 @@ if (-not $subagents.Contains($strictMarker)) {
 } else {
     Write-Host "pi-subagents strict-model patch already present."
 }
+
+& node (Join-Path $PSScriptRoot "patch-pi-subagents-0.14.3.mjs") $AgentDir
+if ($LASTEXITCODE -ne 0) { throw "pi-subagents nested Fleet patch failed: $LASTEXITCODE" }

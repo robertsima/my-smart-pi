@@ -21,7 +21,8 @@ try {
     $settings = [ordered]@{
         packages = @(
             'npm:@kylebrodeur/pi-model-discovery',
-            'npm:@kylebrodeur/pi-model-router'
+            'npm:@kylebrodeur/pi-model-router',
+            'npm:pi-open-tui@0.2.10'
         )
         enabledModels = @('openai-codex/gpt-test', 'llama-local/qwen')
     }
@@ -46,6 +47,8 @@ try {
     $result = [System.IO.File]::ReadAllText((Join-Path $temp 'settings.json'), [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $discovery = @($result.packages) | Where-Object { $_.source -eq 'npm:@kylebrodeur/pi-model-discovery' } | Select-Object -First 1
     $router = @($result.packages) | Where-Object { $_.source -eq 'npm:@kylebrodeur/pi-model-router' } | Select-Object -First 1
+    $openTui = @($result.packages) | Where-Object { $_.source -like 'npm:pi-open-tui*' } | Select-Object -First 1
+    Assert ($null -eq $openTui) 'pi-open-tui removed from active packages'
     Assert ($null -ne $discovery -and @($discovery.extensions) -contains '!dist/index.js') 'model discovery extension excluded'
     Assert ($null -ne $router -and @($router.extensions) -contains '!extensions/index.ts') 'model router extension excluded'
 
@@ -85,6 +88,25 @@ try {
     Write-Utf8 (Join-Path $temp 'agent-routing.local.json') $validRoutingText
 
     Assert ($profile.schemaVersion -ge 1) 'harness profile JSON valid'
+    foreach ($pin in @{
+        'pi-vault-mind' = '0.16.25'; '@lancedb/lancedb' = '0.33.0';
+        'apache-arrow' = '18.1.0'; '@tintinweb/pi-subagents' = '0.14.3'
+    }.GetEnumerator()) {
+        Assert ([string]$profile.npmDependencies.($pin.Key) -eq $pin.Value) "exact pin $($pin.Key)@$($pin.Value)"
+    }
+    Assert (@($profile.removedPackages | Where-Object { $_ -eq 'npm:pi-open-tui' }).Count -eq 1) 'pi-open-tui explicitly removed from active packages'
+    Assert ($profile.subagents.maxSubagentDepth -eq 2 -and $profile.subagents.widgetMode -eq 'off') 'nested Fleet depth and single UI surface configured'
+    $planner = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'agents\harness-api-planner.md'))
+    Assert ($planner.Contains('ext:pi-subagents/Agent')) 'lead planner explicitly delegates'
+    foreach ($leaf in @('harness-api-verifier.md', 'harness-local-implementer.md', 'harness-local-reviewer.md')) {
+        Assert (([System.IO.File]::ReadAllText((Join-Path $RepoRoot "agents\$leaf"))).Contains('extensions: []')) "$leaf remains non-delegating"
+    }
+    Assert (Test-Path -LiteralPath (Join-Path $RepoRoot 'scripts\lance-health.mjs')) 'read-only Lance health script present'
+    $runtimePatchPath = Join-Path $RepoRoot 'scripts\patch-pi-subagents-0.14.3.mjs'
+    Assert (Test-Path -LiteralPath $runtimePatchPath) 'pinned nested Fleet patch script present'
+    $runtimePatch = [System.IO.File]::ReadAllText($runtimePatchPath)
+    Assert ($runtimePatch.Contains('onComplete: handleAgentComplete')) 'nested launches retain activation-scoped completion routing'
+    Assert ($runtimePatch.Contains('options.onComplete ?? this.onComplete')) 'shared manager dispatches completion to the parent activation'
     Assert (Test-Path -LiteralPath (Join-Path $RepoRoot 'docs\AGENT_ROUTING.md')) 'routing documentation present'
 } catch {
     $failures.Add($_.Exception.Message)

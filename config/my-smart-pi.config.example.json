@@ -19,7 +19,10 @@
       }
     ],
     "debounceMs": 2000,
-    "maxChunkChars": 1500
+    "maxChunkChars": 1500,
+    "logLevel": "summary",
+    "optimizeAfterRows": 500,
+    "maintenanceMode": "safe"
   },
   "globalVaultCollections": {
     "vaultRoot": "<YOUR_VAULT_ROOT>",

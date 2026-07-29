@@ -2,8 +2,10 @@
   "schemaVersion": 1,
   "managedPackages": [
     "npm:@tintinweb/pi-subagents@0.14.3",
-    "npm:pi-claude-auth@0.1.3",
-    "npm:pi-open-tui@0.2.10"
+    "npm:pi-claude-auth@0.1.3"
+  ],
+  "removedPackages": [
+    "npm:pi-open-tui"
   ],
   "packageExtensionFilters": {
     "npm:@kylebrodeur/pi-model-discovery": [
@@ -32,19 +34,20 @@
     "pi-claude-auth": "0.1.3",
     "pi-context": "2.1.2",
     "pi-llama-switch": "1.0.2",
-    "pi-open-tui": "0.2.10",
+    "@lancedb/lancedb": "0.33.0",
     "pi-vault-mind": "0.16.25",
     "pi-web-access": "0.15.0"
   },
   "subagents": {
-    "maxConcurrent": 2,
+    "maxConcurrent": 4,
+    "maxSubagentDepth": 2,
     "defaultMaxTurns": 18,
     "graceTurns": 3,
     "defaultJoinMode": "smart",
     "schedulingEnabled": false,
     "scopeModels": true,
     "fleetView": true,
-    "widgetMode": "all",
+    "widgetMode": "off",
     "outputTranscript": true,
     "toolDescriptionMode": "compact",
     "disableDefaultAgents": true

@@ -21,6 +21,14 @@ const DEFAULT_COLLECTION_RULES = [
 const DEFAULT_COLLECTION = "notes";
 const DEFAULT_DEBOUNCE_MS = 2000;
 const DEFAULT_MAX_CHUNK_CHARS = 1500;
+const DEFAULT_OPTIMIZE_AFTER_ROWS = 500;
+
+type LogLevel = "quiet" | "summary" | "debug";
+type MaintenanceMode = "off" | "safe";
+type Coordinator = { owner: symbol; dataDir: string; startedAt: number };
+const COORDINATORS_KEY = Symbol.for("my-smart-pi:vault-autoindex-coordinators");
+const coordinators: Map<string, Coordinator> =
+  ((globalThis as any)[COORDINATORS_KEY] ??= new Map<string, Coordinator>());
 
 type CollectionRule = { pattern: string; collection: string };
 type RawConfig = {
@@ -35,9 +43,12 @@ type RawConfig = {
   lanceModulePath?: string;
   debounceMs?: number;
   maxChunkChars?: number;
+  logLevel?: LogLevel;
+  optimizeAfterRows?: number;
+  maintenanceMode?: MaintenanceMode;
 };
 
-type Config = Required<Pick<RawConfig, "watchRoots" | "collectionRules" | "collections" | "defaultCollection" | "debounceMs" | "maxChunkChars">> & {
+type Config = Required<Pick<RawConfig, "watchRoots" | "collectionRules" | "collections" | "defaultCollection" | "debounceMs" | "maxChunkChars" | "logLevel" | "optimizeAfterRows" | "maintenanceMode">> & {
   vaultRoot: string;
   vaultMindConfigPath: string;
   statePath: string;
@@ -115,6 +126,9 @@ const loadConfig = (cwd: string): Config => {
     lanceModulePath: resolveLanceModule(raw, cwd),
     debounceMs: raw.debounceMs ?? DEFAULT_DEBOUNCE_MS,
     maxChunkChars: raw.maxChunkChars ?? DEFAULT_MAX_CHUNK_CHARS,
+    logLevel: raw.logLevel ?? "summary",
+    optimizeAfterRows: Math.max(0, raw.optimizeAfterRows ?? DEFAULT_OPTIMIZE_AFTER_ROWS),
+    maintenanceMode: raw.maintenanceMode ?? "safe",
   };
 };
 
@@ -228,11 +242,27 @@ export default async function (pi: any) {
   let queue: Promise<void> = Promise.resolve();
   let compatibilityValidated = false;
   let rebuildDeferredReason: string | undefined;
+  let passive = false;
+  let coordinatorKey: string | undefined;
+  let rowsSinceOptimize = 0;
+  let indexedFiles = 0;
+  const owner = Symbol("vault-autoindex-owner");
   const failures: string[] = [];
   const watchers: fs.FSWatcher[] = [];
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  const log = (msg: string) => console.log(`[my-smart-pi:autoindex] ${msg}`);
+  const log = (msg: string, level: LogLevel = "summary") => {
+    if (cfg?.logLevel === "quiet" || (level === "debug" && cfg?.logLevel !== "debug")) return;
+    console.log(`[my-smart-pi:autoindex] ${msg}`);
+  };
+  const canonicalDataDir = (vmCfg: any): string => {
+    const configured = String(vmCfg.dataDir || "");
+    const absolute = path.isAbsolute(configured)
+      ? configured
+      : path.resolve(path.dirname(cfg!.vaultMindConfigPath), configured);
+    try { return fs.realpathSync.native(absolute).toLowerCase(); }
+    catch { return path.resolve(absolute).toLowerCase(); }
+  };
   const isWithin = (root: string, target: string): boolean => {
     const rel = path.relative(path.resolve(root), path.resolve(target));
     return rel === "" || (!path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`));
@@ -327,20 +357,13 @@ export default async function (pi: any) {
       compatibilityValidated = true;
       return;
     }
-    if (!force && !signatureChanged) log("managed table compatibility check failed; rebuilding managed collections");
 
-    const mod = await lance(cfg!);
-    const conn = await mod.connect(vmCfg.dataDir);
-    const existing = new Set(await conn.tableNames());
-    for (const collection of cfg!.collections) {
-      const tableName = `collection_${collection}`;
-      if (existing.has(tableName)) await conn.dropTable(tableName);
-    }
-    mod.resetConnection();
-    saveState(cfg!, { indexSignature: signature, files: {} });
-    compatibilityValidated = true;
-    const reason = force ? "forced rebuild" : signatureChanged ? "index configuration changed" : "incompatible managed table";
-    rebuildDeferredReason = `${reason}; managed collections reset. Restart Pi to rebuild with fresh LanceDB handles.`;
+    // Never drop or mutate live tables here. Lance handles may be shared by the
+    // root and nested sessions; an automatic drop can invalidate all of them.
+    const reason = force ? "forced rebuild requested" : signatureChanged
+      ? "index configuration changed" : "managed table compatibility check failed";
+    rebuildDeferredReason = `${reason}; rebuild required. Stop all Pi processes, back up ${vmCfg.dataDir}, and run an explicit offline repair. No tables were changed.`;
+    compatibilityValidated = false;
     log(rebuildDeferredReason);
   };
 
@@ -382,13 +405,60 @@ export default async function (pi: any) {
     return chunks.length;
   };
 
+  const optimizeIfDue = async () => {
+    if (!cfg || cfg.maintenanceMode !== "safe" || cfg.optimizeAfterRows <= 0 || rowsSinceOptimize < cfg.optimizeAfterRows) return;
+    const vmCfg = await loadVmConfig(cfg);
+    const mod = await lance(cfg);
+    const conn = await mod.connect(vmCfg.dataDir);
+    const names = new Set(await conn.tableNames());
+    for (const collection of cfg.collections) {
+      const name = `collection_${collection}`;
+      if (!names.has(name)) continue;
+      const table = await conn.openTable(name);
+      if (typeof table.optimize === "function") await table.optimize();
+    }
+    log(`maintenance optimized after ${rowsSinceOptimize} written row(s)`);
+    rowsSinceOptimize = 0;
+  };
+
+  const optimizeExistingFtsBacklog = async () => {
+    if (!cfg || cfg.maintenanceMode !== "safe" || cfg.optimizeAfterRows <= 0) return;
+    try {
+      const vmCfg = await loadVmConfig(cfg);
+      const mod = await lance(cfg);
+      const conn = await mod.connect(vmCfg.dataDir);
+      const names = new Set(await conn.tableNames());
+      for (const collection of cfg.collections) {
+        const name = `collection_${collection}`;
+        if (!names.has(name)) continue;
+        const table = await conn.openTable(name);
+        if (typeof table.listIndices !== "function" || typeof table.indexStats !== "function" || typeof table.optimize !== "function") continue;
+        const indices = await table.listIndices();
+        let backlog = 0;
+        let indexedRows = 0;
+        for (const index of indices) {
+          const type = String(index?.indexType ?? index?.type ?? "").toUpperCase();
+          if (type !== "FTS" && !String(index?.name ?? "").toLowerCase().includes("fts")) continue;
+          const stats = await table.indexStats(index.name);
+          backlog = Math.max(backlog, Number(stats?.numUnindexedRows ?? 0));
+          indexedRows = Math.max(indexedRows, Number(stats?.numIndexedRows ?? 0));
+        }
+        if (backlog <= 0 || (indexedRows > 0 && backlog < cfg.optimizeAfterRows)) continue;
+        log(`maintenance: optimizing ${collection} (${backlog} FTS delta rows)`);
+        await table.optimize();
+      }
+    } catch (error) {
+      log(`maintenance deferred: ${(error as Error).message}`);
+    }
+  };
+
   const removeFile = async (abs: string) => {
     const rel = relOf(abs);
     await deleteRowsFor(rel);
     const state = loadState(cfg!);
     delete state.files[rel];
     saveState(cfg!, state);
-    log(`removed index for ${rel}`);
+    log(`removed ${rel}`, "debug");
   };
 
   const scheduleIndex = (abs: string) => {
@@ -404,7 +474,10 @@ export default async function (pi: any) {
       const chunks = await indexFile(abs);
       state.files[rel] = { mtimeMs, chunks };
       saveState(cfg, state);
-      log(`indexed ${rel} (${chunks} chunk(s))`);
+      rowsSinceOptimize += chunks;
+      indexedFiles++;
+      log(`indexed ${rel} (${chunks} chunk(s))`, "debug");
+      await optimizeIfDue();
     });
   };
 
@@ -427,21 +500,35 @@ export default async function (pi: any) {
   };
 
   const stop = () => {
+    if (passive) return;
     for (const watcher of watchers) watcher.close();
     watchers.length = 0;
     for (const timer of timers.values()) clearTimeout(timer);
     timers.clear();
+    if (coordinatorKey && coordinators.get(coordinatorKey)?.owner === owner) coordinators.delete(coordinatorKey);
+    coordinatorKey = undefined;
   };
 
-  const start = (_event: any, ctx: any) => {
+  const start = async (_event: any, ctx: any) => {
     stop();
     try {
       cfg = loadConfig(ctx.cwd);
+      const vmCfg = await loadVmConfig(cfg);
+      coordinatorKey = canonicalDataDir(vmCfg);
+      const active = coordinators.get(coordinatorKey);
+      if (active && active.owner !== owner) {
+        passive = true;
+        log(`shared coordinator active for ${active.dataDir}`, "debug");
+        return;
+      }
+      passive = false;
+      coordinators.set(coordinatorKey, { owner, dataDir: coordinatorKey, startedAt: Date.now() });
     } catch (error) {
       log(`disabled: ${(error as Error).message}`);
       return;
     }
 
+    let watched = 0;
     for (const root of cfg.watchRoots) {
       if (!fs.existsSync(root)) {
         log(`watch root missing, skipped: ${root}`);
@@ -458,13 +545,18 @@ export default async function (pi: any) {
             scheduleIndex(abs);
           }, cfg!.debounceMs));
         }));
-        log(`watching ${root}`);
+        watched++;
       } catch (error) {
         log(`watch failed for ${root}: ${(error as Error).message}; startup scans still work`);
       }
     }
     enqueue(() => ensureIndexCompatibility());
     fullScan();
+    await queue;
+    await optimizeExistingFtsBacklog();
+    const state = loadState(cfg);
+    const rows = Object.values(state.files).reduce((sum, file) => sum + file.chunks, 0);
+    log(`ready: ${watched}/${cfg.watchRoots.length} roots, ${Object.keys(state.files).length} files, ${rows} rows, collections ${cfg.collections.join(",")}`);
   };
 
   pi.on("session_start", start);

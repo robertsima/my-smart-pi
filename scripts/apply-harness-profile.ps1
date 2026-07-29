@@ -61,7 +61,11 @@ New-Item -ItemType Directory -Force -Path $npmDir | Out-Null
 $npmPackage = [ordered]@{
     private = $true
     dependencies = [ordered]@{}
-    overrides = [ordered]@{ "pi-vault-mind" = [ordered]@{ "apache-arrow" = "18.1.0" } }
+    overrides = [ordered]@{
+        "apache-arrow" = "18.1.0"
+        "@lancedb/lancedb" = "0.33.0"
+        "pi-vault-mind" = [ordered]@{ "apache-arrow" = "18.1.0" }
+    }
 }
 foreach ($property in $profile.npmDependencies.PSObject.Properties) {
     $npmPackage.dependencies[$property.Name] = [string]$property.Value
@@ -85,10 +89,13 @@ if ($null -eq $settings.PSObject.Properties["packages"]) {
 }
 $managedByIdentity = @{}
 foreach ($source in $profile.managedPackages) { $managedByIdentity[(Get-PackageIdentity ([string]$source))] = [string]$source }
+$removedByIdentity = @{}
+foreach ($source in @($profile.removedPackages)) { $removedByIdentity[(Get-PackageIdentity ([string]$source))] = $true }
 $preserved = @()
 foreach ($entry in @($settings.packages)) {
     $source = Get-PackageSource $entry
-    if ($managedByIdentity.ContainsKey((Get-PackageIdentity $source))) { continue }
+    $identity = Get-PackageIdentity $source
+    if ($managedByIdentity.ContainsKey($identity) -or $removedByIdentity.ContainsKey($identity)) { continue }
     $preserved += $entry
 }
 $managedEntries = @($profile.managedPackages | ForEach-Object { [ordered]@{ source = [string]$_ } })
@@ -150,6 +157,20 @@ if ($startIndex -ge 0 -and $endIndex -gt $startIndex) {
     $append = $append.TrimEnd() + "`r`n`r`n" + $managedBlock.Trim() + "`r`n"
 }
 Write-Utf8NoBom $appendPath $append
+
+# Pi executes extensions from its installed git package cache. Keep that cache
+# aligned with this working checkout so profile changes take effect immediately;
+# fresh installs receive the same files from the committed package.
+$installedHarnessRoot = Join-Path $AgentDir "git\github.com\robertsima\my-smart-pi"
+if (Test-Path -LiteralPath $installedHarnessRoot) {
+    foreach ($relativePath in @("extensions\vault-autoindex.ts", "extensions\harness-routing-guard.ts")) {
+        $sourcePath = Join-Path $RepoRoot $relativePath
+        $destinationPath = Join-Path $installedHarnessRoot $relativePath
+        if ((Test-Path -LiteralPath $sourcePath) -and (Test-Path -LiteralPath (Split-Path -Parent $destinationPath))) {
+            [System.IO.File]::WriteAllText($destinationPath, (Read-Utf8 $sourcePath), $Utf8NoBom)
+        }
+    }
+}
 
 if (-not $SkipRuntimePatches) {
     & (Join-Path $PSScriptRoot "patch-runtime-packages.ps1") -AgentDir $AgentDir
