@@ -1,7 +1,7 @@
 {
   "name": "my-smart-pi",
-  "version": "0.1.0",
-  "description": "Shareable Pi harness package: tapered context, lazy tool loading, vault autoindexing, and tool-output pruning.",
+  "version": "0.1.1",
+  "description": "Shareable Pi harness package: API/llama.cpp agent routing, tapered context, lazy tools, and vault indexing.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -18,6 +18,11 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "apply-profile": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/apply-harness-profile.ps1",
+    "doctor": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/doctor.ps1",
+    "test": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-harness-profile.ps1"
   },
   "pi": {
     "extensions": [

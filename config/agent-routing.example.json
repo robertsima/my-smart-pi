@@ -1,0 +1,13 @@
+{
+  "roles": {
+    "planner": { "model": "", "thinking": "high" },
+    "verifier": { "model": "", "thinking": "high" },
+    "implementer": { "model": "", "thinking": "medium" },
+    "reviewer": { "model": "", "thinking": "medium" }
+  },
+  "local": {
+    "switchKey": "",
+    "maxParallel": 1
+  },
+  "forbiddenModelPatterns": []
+}

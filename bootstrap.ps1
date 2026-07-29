@@ -250,6 +250,7 @@ if ($ReadOnlySubdir) { Ok "read-only $vaultFwd/$ReadOnlySubdir" }
 Step 'Seeding config boilerplates'
 $seeds = @(
   @{ Src = 'config\model-switcher.example.json';     Dst = Join-Path $AgentDir 'model-switcher.json' }
+  @{ Src = 'config\agent-routing.example.json';      Dst = Join-Path $AgentDir 'agent-routing.local.json' }
   @{ Src = 'config\APPEND_SYSTEM.example.md';        Dst = Join-Path $AgentDir 'APPEND_SYSTEM.md' }
   @{ Src = 'config\models-store.example.json';       Dst = Join-Path $AgentDir 'models-store.json' }
   @{ Src = 'config\ollama-model-cache.example.json'; Dst = Join-Path $AgentDir 'ollama-model-cache.json' }
@@ -473,23 +474,16 @@ function Patch-VaultMindIdentityLeak {
 if (-not $SkipNpm) {
   Step 'Installing npm packages (apache-arrow pinned to 18.1.0)'
   if (-not (Test-Path $NpmDir)) { New-Item -ItemType Directory -Force -Path $NpmDir | Out-Null }
+  $harnessProfile = Get-Content (Join-Path $PSScriptRoot 'config\harness-profile.json') -Raw | ConvertFrom-Json
+  $profileDeps = [ordered]@{}
+  foreach ($property in $harnessProfile.npmDependencies.PSObject.Properties) {
+    $profileDeps[$property.Name] = [string]$property.Value
+  }
   $npmPkg = [ordered]@{
-    name    = 'pi-extensions'
-    private = $true
-    dependencies = [ordered]@{
-      '@aliou/pi-guardrails'              = '^0.16.0'
-      '@kylebrodeur/pi-model-discovery'   = '^0.7.24'
-      '@kylebrodeur/pi-model-router'      = '^0.3.0'
-      '@ollama/pi-web-search'             = '^0.0.5'
-      '@xenova/transformers'              = '^2.17.2'
-      'apache-arrow'                      = '18.1.0'
-      'pi-caveman'                        = '^1.0.7'
-      'pi-context'                        = '^2.1.2'
-      'pi-llama-switch'                   = '^1.0.2'
-      'pi-vault-mind'                     = '^0.16.25'
-      'pi-web-access'                     = '^0.15.0'
-    }
-    overrides = [ordered]@{
+    name         = 'pi-extensions'
+    private      = $true
+    dependencies = $profileDeps
+    overrides    = [ordered]@{
       'pi-vault-mind' = [ordered]@{ 'apache-arrow' = '18.1.0' }
     }
   }
@@ -501,7 +495,7 @@ if (-not $SkipNpm) {
   $prevNpm = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   try {
-    & npm install --no-audit --no-fund 2>&1 | Out-Null
+    & npm install --no-audit --no-fund --legacy-peer-deps 2>&1 | Out-Null
     $arrowPkg = Join-Path $NpmDir 'node_modules\apache-arrow\package.json'
     if (Test-Path $arrowPkg) {
       $arrow = (Get-Content $arrowPkg -Raw | ConvertFrom-Json).version
@@ -551,7 +545,39 @@ Write-Json $LocalCfgPath ([ordered]@{
 })
 Ok "bootstrap.local.json (gitignored) -- re-run with no arguments to reapply"
 
+Step 'Applying API/llama.cpp harness profile'
+$routingPath = Join-Path $AgentDir 'agent-routing.local.json'
+$routingReady = $false
+if (Test-Path -LiteralPath $routingPath) {
+  try {
+    $routingCheck = Get-Content -LiteralPath $routingPath -Raw | ConvertFrom-Json
+    $routingPolicy = Get-Content -LiteralPath (Join-Path $RepoRoot 'config\harness-profile.json') -Raw | ConvertFrom-Json
+    $localProvider = [string]$routingPolicy.routingPolicy.localProvider
+    $apiProviders = @($routingPolicy.routingPolicy.apiProviders | ForEach-Object { [string]$_ })
+    $apiRoles = @($routingPolicy.routingPolicy.apiRoles | ForEach-Object { [string]$_ })
+    $localRoles = @($routingPolicy.routingPolicy.localRoles | ForEach-Object { [string]$_ })
+    $routingReady = -not [string]::IsNullOrWhiteSpace([string]$routingCheck.local.switchKey) -and
+      [int]$routingCheck.local.maxParallel -eq [int]$routingPolicy.routingPolicy.maxLocalParallel
+    foreach ($role in @('planner', 'verifier', 'implementer', 'reviewer')) {
+      $model = [string]$routingCheck.roles.$role.model
+      $provider = $model.Split('/', 2)[0]
+      $usesLocalProvider = $provider.Equals($localProvider, [System.StringComparison]::OrdinalIgnoreCase)
+      $routingReady = $routingReady -and -not [string]::IsNullOrWhiteSpace($model)
+      if ($role -in $apiRoles) { $routingReady = $routingReady -and ($apiProviders -contains $provider) }
+      if ($role -in $localRoles) { $routingReady = $routingReady -and $usesLocalProvider }
+    }
+  } catch {
+    Warn "agent-routing.local.json is invalid JSON: $($_.Exception.Message)"
+  }
+}
+if ($routingReady) {
+  & (Join-Path $PSScriptRoot 'scripts\apply-harness-profile.ps1') -AgentDir $AgentDir -SkipNpmInstall
+  Ok 'packages, subagents, machine-local role bindings, runtime patches, and managed prompt block'
+} else {
+  Warn 'Harness profile not applied yet. Edit agent-routing.local.json and model-switcher.json, then run npm run apply-profile.'
+}
+
 Write-Host ''
 Write-Host 'Done.' -ForegroundColor Green
 Write-Host 'Start pi, then run /reload if it was already running.'
-Write-Host "Verify with:  pi list"
+Write-Host "Verify with:  npm run doctor"

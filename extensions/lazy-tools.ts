@@ -22,29 +22,24 @@
  * load_tools works in GROUPS so one expansion covers a whole task.
  */
 
-// Always-active set. model_switch stays core so the llama-switch harness
-// keeps working; context_checkpoint is cheap and frequently used. Global
-// vault collection tools stay core so configured vault memory works from any cwd
-// without first calling load_tools.
+// Always-active set. Memory/search tools stay deferred: one load_tools call is
+// cheaper than carrying duplicate vault schemas on every model turn.
 const CORE = [
   "read", "bash", "edit", "write", "ls", "grep", "find",
-  "context_checkpoint",
-  "model_switch",
-  "load_tools",
-  "vault_collection_search", "vault_collection_query",
-  "vault_collection_list", "vault_collection_status",
+  "context_checkpoint", "model_switch", "load_tools",
 ];
 
 // Named bundles so one call covers a task instead of N calls.
 // Names verified against what the installed packages actually register.
 const GROUPS: Record<string, string[]> = {
-  vault: [
-    "vm_search", "vm_query", "vm_append", "vm_stats", "vm_status",
-    "vm_describe", "ask_intake", "tombstone_entry", "vault_reindex",
-    "session_recall", "session_memory_status", "session_memory_read",
-    "vault_collection_search", "vault_collection_query",
-    "vault_collection_list", "vault_collection_status",
+  vault: ["vm_search", "session_recall", "vault_collection_search"],
+  "vault-write": [
+    "vm_query", "vm_append", "vm_stats", "vm_status", "vm_describe",
+    "ask_intake", "tombstone_entry", "vault_reindex",
+    "session_memory_status", "session_memory_read",
+    "vault_collection_query", "vault_collection_list", "vault_collection_status",
   ],
+  agents: ["Agent", "get_subagent_result", "steer_subagent"],
   admin: [
     "vm_configure", "vm_collection_manage", "vm_injector_manage",
     "discover_schema", "vm_sync", "vm_ingest", "vm_promote", "vm_export",
@@ -167,7 +162,7 @@ export default async function (pi: any) {
     label: "Load Tools",
     description:
       "Activate additional tools that are not currently loaded. Pass group names " +
-      "(vault, admin, web, context) and/or individual tool names. The " +
+      "(vault, vault-write, agents, admin, web, context) and/or individual tool names. The " +
       "requested tools become callable on your next step. Prefer loading a whole " +
       "group in one call rather than several separate calls.",
     promptSnippet: 'load_tools(names=["vault"])',
@@ -183,7 +178,7 @@ export default async function (pi: any) {
           type: "array",
           items: { type: "string" },
           description:
-            "Group names (vault, admin, web, context) and/or exact tool names.",
+            "Group names (vault, vault-write, agents, admin, web, context) and/or exact tool names.",
         },
       },
       required: ["names"],
@@ -252,15 +247,17 @@ export default async function (pi: any) {
 
     let prompt = stripHiddenSkills(event.systemPrompt);
 
+    const grouped = new Set(Object.values(GROUPS).flat());
     const deferred = pi
       .getAllTools()
-      .filter((t: any) => !active.has(t.name))
+      .filter((t: any) => !active.has(t.name) && !grouped.has(t.name))
       .map((t: any) => `  ${t.name}: ${firstLine(t.description)}`);
 
     if (deferred.length > 0) {
       const GROUP_INFO: Record<string, string> = {
-        vault:
-          "embedding/semantic search and memory over the user's notes and project knowledge — use for anything the user wrote, did, or asked to remember",
+        vault: "bounded memory search only",
+        "vault-write": "memory writes, status, reindex, and exact queries",
+        agents: "launch, inspect, and steer subagents",
         admin: "vault-mind administration and ingestion",
         web: "public internet only — never for the user's own notes or memory",
         context: "session context timeline and compaction",
@@ -278,7 +275,7 @@ export default async function (pi: any) {
         `\n\n<deferred_tools>\n` +
         `These tools exist but are NOT currently callable. To use one, first call\n` +
         `load_tools with its group name (preferred) or its exact name.\n\n` +
-        `Groups:\n${groupList}\n\nTools:\n${deferred.join("\n")}\n` +
+        `Groups:\n${groupList}${deferred.length ? `\n\nUngrouped tools:\n${deferred.join("\n")}` : ""}\n` +
         `</deferred_tools>\n`;
     }
 

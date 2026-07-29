@@ -1,11 +1,10 @@
+import { findCutPoint } from "@earendil-works/pi-coding-agent";
 import type {
-  CompactionPreparation,
   CompactionSettings,
   ExtensionAPI,
   ExtensionContext,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { prepareCompaction } from "@earendil-works/pi-coding-agent";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -55,7 +54,7 @@ async function getCoreCompactionSettings(): Promise<CompactionSettings> {
   } catch {
     cachedCoreCompactionSettings = CORE_COMPACTION_FALLBACK;
   }
-  return cachedCoreCompactionSettings;
+  return cachedCoreCompactionSettings ?? CORE_COMPACTION_FALLBACK;
 }
 
 const TOOL_STUB_PREFIX = "[Tool output archived]";
@@ -208,19 +207,25 @@ function formatTokens(tokens: number): string {
   return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
 }
 
-function replacePreparation(target: CompactionPreparation, source: CompactionPreparation): void {
-  target.firstKeptEntryId = source.firstKeptEntryId;
-  target.messagesToSummarize = source.messagesToSummarize;
-  target.turnPrefixMessages = source.turnPrefixMessages;
-  target.isSplitTurn = source.isSplitTurn;
-  target.tokensBefore = source.tokensBefore;
-  target.previousSummary = source.previousSummary;
-  target.fileOps = source.fileOps;
-  target.settings = source.settings;
-}
-
 function lastEntryIsCompaction(entries: SessionEntry[]): boolean {
   return entries[entries.length - 1]?.type === "compaction";
+}
+
+function canCompact(branch: SessionEntry[], keepRecentTokens: number): boolean {
+  if (branch.length === 0 || lastEntryIsCompaction(branch)) return false;
+
+  let boundaryStart = 0;
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry.type !== "compaction") continue;
+    const firstKeptIndex = branch.findIndex((candidate) => candidate.id === entry.firstKeptEntryId);
+    boundaryStart = firstKeptIndex >= 0 ? firstKeptIndex : i + 1;
+    break;
+  }
+
+  const cutPoint = findCutPoint(branch, boundaryStart, branch.length, keepRecentTokens);
+  const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptEntryIndex;
+  return historyEnd > boundaryStart || (cutPoint.isSplitTurn && cutPoint.firstKeptEntryIndex > cutPoint.turnStartIndex);
 }
 
 function triggerCompaction(ctx: ExtensionContext, reason: string, onSettled?: () => void): void {
@@ -262,21 +267,14 @@ export default function (pi: ExtensionAPI) {
       event.preparation.settings.reserveTokens,
     );
 
-    const settings: CompactionSettings = {
-      ...event.preparation.settings,
-      keepRecentTokens: policy.keepRecentTokens,
-    };
-
-    const dynamicPreparation = prepareCompaction(event.branchEntries, settings);
-    if (!dynamicPreparation) return;
-
-    replacePreparation(event.preparation, dynamicPreparation);
+    // Pi 0.81 no longer exports prepareCompaction. Keep core-generated boundary;
+    // tapered triggering and tool-output redaction remain active without private APIs.
     await redactAllToolResults(ctx, event.preparation.messagesToSummarize as any[], archivedToolOutputs);
     await redactAllToolResults(ctx, event.preparation.turnPrefixMessages as any[], archivedToolOutputs);
 
     if (ctx.hasUI) {
       ctx.ui.notify(
-        `${EXT_NAME}: keep raw tail ~${formatTokens(policy.keepRecentTokens)} (before ${formatTokens(policy.contextTokens)})`,
+        `${EXT_NAME}: keep core raw tail ~${formatTokens(event.preparation.settings.keepRecentTokens)} (before ${formatTokens(policy.contextTokens)})`,
         "info",
       );
     }
@@ -351,7 +349,7 @@ export default function (pi: ExtensionAPI) {
 
     const coreSettings = await getCoreCompactionSettings();
     if (coreSettings.enabled === false) return;
-    if (!prepareCompaction(branch, coreSettings)) return;
+    if (!canCompact(branch, coreSettings.keepRecentTokens ?? CORE_COMPACTION_FALLBACK.keepRecentTokens!)) return;
 
     compactionQueued = true;
     triggerCompaction(ctx, `at ${formatTokens(currentTokens)} > ${formatTokens(policy.triggerTokens)}`, () => {
@@ -370,7 +368,10 @@ export default function (pi: ExtensionAPI) {
       if (command === "compact") {
         const coreSettings = await getCoreCompactionSettings();
         const branch = ctx.sessionManager.getBranch();
-        if (coreSettings.enabled === false || !prepareCompaction(branch, coreSettings)) {
+        if (coreSettings.enabled === false || !canCompact(
+          branch,
+          coreSettings.keepRecentTokens ?? CORE_COMPACTION_FALLBACK.keepRecentTokens!,
+        )) {
           ctx.ui.notify(`${EXT_NAME}: nothing to compact (session too small)`, "info");
           return;
         }
@@ -381,11 +382,14 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      const coreSettings = await getCoreCompactionSettings();
+      const coreTail = coreSettings.keepRecentTokens ?? CORE_COMPACTION_FALLBACK.keepRecentTokens!;
       const lines = [
         `${EXT_NAME}: enabled`,
         `context now: ${formatTokens(currentTokens)}`,
         `soft trigger: ${formatTokens(policy.triggerTokens)}`,
-        `raw tail kept after compaction: ~${formatTokens(policy.keepRecentTokens)}`,
+        `suggested tapered tail (trigger policy only): ~${formatTokens(policy.keepRecentTokens)}`,
+        `actual Pi core tail: ~${formatTokens(coreTail)}`,
         `hard ceiling: ${formatTokens(policy.hardCeilingTokens)} of ${formatTokens(policy.contextWindow)} window`,
         `tool output archive: ${TOOL_OUTPUT_ARCHIVE_ROOT}`,
         "command: /tapered-context compact",

@@ -8,6 +8,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
@@ -43,7 +44,10 @@ type Config = Required<Pick<RawConfig, "watchRoots" | "collectionRules" | "colle
   lanceModulePath: string;
 };
 
-type State = { files: Record<string, { mtimeMs: number; chunks: number }> };
+type State = {
+  indexSignature?: string;
+  files: Record<string, { mtimeMs: number; chunks: number }>;
+};
 
 const agentDir = () =>
   process.env.PI_AGENT_DIR || path.join(process.env.USERPROFILE || process.env.HOME || process.cwd(), ".pi", "agent");
@@ -124,8 +128,26 @@ const lance = async (cfg: Config) => {
   return lanceMod;
 };
 
-const loadVmConfig = (cfg: Config): any =>
-  JSON.parse(fs.readFileSync(cfg.vaultMindConfigPath, "utf8")).vaultMind;
+const loadVmConfig = async (cfg: Config): Promise<any> => {
+  const vmCfg = JSON.parse(fs.readFileSync(cfg.vaultMindConfigPath, "utf8")).vaultMind;
+  const embedding = vmCfg?.embedding ?? {};
+
+  // pi-vault-mind merges current defaults over legacy Ollama keys. Mirror that
+  // normalization so autoindex writes same vector dimension that vm_search queries.
+  if (embedding.provider === "ollama") {
+    const ollamaHost = String(embedding.ollamaHost ?? "http://127.0.0.1:11434").replace(/\/$/, "");
+    const model = embedding.model ?? embedding.ollamaModel ?? "embeddinggemma";
+    const inferredDim = /^embeddinggemma(?::|$)/i.test(String(model)) ? 768 : undefined;
+    vmCfg.embedding = {
+      ...embedding,
+      localUrl: embedding.localUrl ?? ollamaHost,
+      model,
+      dim: embedding.dim ?? inferredDim,
+    };
+  }
+
+  return vmCfg;
+};
 
 const loadState = (cfg: Config): State => {
   try { return JSON.parse(fs.readFileSync(cfg.statePath, "utf8")); }
@@ -135,6 +157,26 @@ const loadState = (cfg: Config): State => {
 const saveState = (cfg: Config, state: State) => {
   fs.mkdirSync(path.dirname(cfg.statePath), { recursive: true });
   fs.writeFileSync(cfg.statePath, JSON.stringify(state, null, 1), "utf8");
+};
+
+const indexSignature = (cfg: Config, vmCfg: any): string => {
+  const embedding = vmCfg.embedding ?? {};
+  const compatibilityInput = JSON.stringify({
+    schema: 3,
+    dataDir: vmCfg.dataDir,
+    embedding: {
+      provider: embedding.provider,
+      localUrl: embedding.localUrl,
+      remoteUrl: embedding.remoteUrl,
+      model: embedding.model,
+      dim: embedding.dim,
+      useTransformers: embedding.useTransformers,
+    },
+    maxChunkChars: cfg.maxChunkChars,
+    defaultCollection: cfg.defaultCollection,
+    collectionRules: cfg.collectionRules,
+  });
+  return createHash("sha256").update(compatibilityInput).digest("hex");
 };
 
 const stripFrontmatter = (text: string): { body: string; tags: string[] } => {
@@ -184,10 +226,27 @@ const sqlString = (value: string): string => value.replace(/'/g, "''");
 export default async function (pi: any) {
   let cfg: Config | undefined;
   let queue: Promise<void> = Promise.resolve();
+  let compatibilityValidated = false;
+  let rebuildDeferredReason: string | undefined;
+  const failures: string[] = [];
   const watchers: fs.FSWatcher[] = [];
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
   const log = (msg: string) => console.log(`[my-smart-pi:autoindex] ${msg}`);
+  const isWithin = (root: string, target: string): boolean => {
+    const rel = path.relative(path.resolve(root), path.resolve(target));
+    return rel === "" || (!path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`));
+  };
+  const isManagedMarkdown = (abs: string): boolean => {
+    if (path.extname(abs).toLowerCase() !== ".md" || !cfg!.watchRoots.some((root) => isWithin(root, abs))) return false;
+    if (!fs.existsSync(abs)) return true;
+    try {
+      const real = fs.realpathSync(abs);
+      return path.extname(real).toLowerCase() === ".md" && cfg!.watchRoots.some((root) => isWithin(root, real));
+    } catch {
+      return false;
+    }
+  };
   const relOf = (abs: string) => path.relative(cfg!.vaultRoot, abs).split(path.sep).join("/");
   const collectionFor = (rel: string): string => {
     for (const rule of cfg!.collectionRules) {
@@ -197,12 +256,97 @@ export default async function (pi: any) {
   };
 
   const enqueue = (job: () => Promise<void>) => {
-    queue = queue.then(job).catch((error) => log(`error: ${error?.message ?? error}`));
+    queue = queue.then(job).catch((error) => {
+      const message = error?.message ?? String(error);
+      failures.push(message);
+      if (failures.length > 100) failures.shift();
+      log(`error: ${message}`);
+    });
+  };
+
+  const managedTablesCompatible = async (vmCfg: any, state: State): Promise<boolean> => {
+    const mod = await lance(cfg!);
+    const conn = await mod.connect(vmCfg.dataDir);
+    const existing = new Set(await conn.tableNames());
+    const collectionsWithState = new Set(
+      Object.keys(state.files).map((rel) => collectionFor(rel)),
+    );
+    const expectedDim = Number(vmCfg.embedding?.dim);
+
+    for (const collection of cfg!.collections) {
+      const tableName = `collection_${collection}`;
+      if (!existing.has(tableName)) {
+        if (collectionsWithState.has(collection)) {
+          log(`compatibility failure: missing ${tableName}`);
+          return false;
+        }
+        continue;
+      }
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const table = await conn.openTable(tableName);
+          const indices = await table.listIndices();
+          const hasFts = indices.some((index: any) =>
+            String(index?.indexType || "").toUpperCase() === "FTS" && Array.isArray(index?.columns) && index.columns.includes("fact"),
+          );
+          if (!hasFts) {
+            log(`compatibility failure: ${tableName} has no FTS index on fact`);
+            return false;
+          }
+          const schema = await table.schema();
+          const vectorField = schema.fields.find((field: any) => field.name === "vector");
+          const actualDim = Number((vectorField?.type as any)?.listSize);
+          if (Number.isFinite(expectedDim) && expectedDim > 0 && actualDim !== expectedDim) {
+            log(`compatibility failure: ${tableName} vector dimension ${actualDim}; expected ${expectedDim}`);
+            return false;
+          }
+          await table.query().nearestToText("my-smart-pi-index-health-probe").limit(1).toArray();
+          lastError = undefined;
+          break;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        }
+      }
+      if (lastError) {
+        log(`compatibility failure: ${tableName}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const ensureIndexCompatibility = async (force = false): Promise<void> => {
+    if (!force && compatibilityValidated) return;
+    const vmCfg = await loadVmConfig(cfg!);
+    const signature = indexSignature(cfg!, vmCfg);
+    const state = loadState(cfg!);
+    const signatureChanged = state.indexSignature !== signature;
+    if (!force && !signatureChanged && await managedTablesCompatible(vmCfg, state)) {
+      compatibilityValidated = true;
+      return;
+    }
+    if (!force && !signatureChanged) log("managed table compatibility check failed; rebuilding managed collections");
+
+    const mod = await lance(cfg!);
+    const conn = await mod.connect(vmCfg.dataDir);
+    const existing = new Set(await conn.tableNames());
+    for (const collection of cfg!.collections) {
+      const tableName = `collection_${collection}`;
+      if (existing.has(tableName)) await conn.dropTable(tableName);
+    }
+    mod.resetConnection();
+    saveState(cfg!, { indexSignature: signature, files: {} });
+    compatibilityValidated = true;
+    const reason = force ? "forced rebuild" : signatureChanged ? "index configuration changed" : "incompatible managed table";
+    rebuildDeferredReason = `${reason}; managed collections reset. Restart Pi to rebuild with fresh LanceDB handles.`;
+    log(rebuildDeferredReason);
   };
 
   const deleteRowsFor = async (rel: string) => {
     const { connect } = await lance(cfg!);
-    const vmCfg = loadVmConfig(cfg!);
+    const vmCfg = await loadVmConfig(cfg!);
     const conn = await connect(vmCfg.dataDir);
     const tableNames = await conn.tableNames();
     for (const collection of cfg!.collections) {
@@ -219,7 +363,7 @@ export default async function (pi: any) {
     const { body, tags } = stripFrontmatter(raw);
     const chunks = chunkNote(body, cfg!.maxChunkChars);
     const { upsertEntry } = await lance(cfg!);
-    const vmCfg = loadVmConfig(cfg!);
+    const vmCfg = await loadVmConfig(cfg!);
     await deleteRowsFor(rel);
     const title = path.basename(abs, ".md");
     const tag = tags[0] ?? rel.split("/")[1]?.toLowerCase() ?? "note";
@@ -250,6 +394,8 @@ export default async function (pi: any) {
   const scheduleIndex = (abs: string) => {
     enqueue(async () => {
       if (!cfg) return;
+      await ensureIndexCompatibility();
+      if (rebuildDeferredReason) return;
       if (!fs.existsSync(abs)) return removeFile(abs);
       const rel = relOf(abs);
       const mtimeMs = fs.statSync(abs).mtimeMs;
@@ -275,9 +421,8 @@ export default async function (pi: any) {
 
     const state = loadState(cfg);
     for (const rel of Object.keys(state.files)) {
-      const abs = path.join(cfg.vaultRoot, rel);
-      const inScope = cfg.watchRoots.some((root) => abs.startsWith(path.resolve(root)));
-      if (inScope && !fs.existsSync(abs)) enqueue(() => removeFile(abs));
+      const abs = path.resolve(cfg.vaultRoot, rel);
+      if (isManagedMarkdown(abs) && !fs.existsSync(abs)) enqueue(() => removeFile(abs));
     }
   };
 
@@ -318,6 +463,7 @@ export default async function (pi: any) {
         log(`watch failed for ${root}: ${(error as Error).message}; startup scans still work`);
       }
     }
+    enqueue(() => ensureIndexCompatibility());
     fullScan();
   };
 
@@ -340,15 +486,39 @@ export default async function (pi: any) {
     },
     async execute(_id: string, params: { file?: string; force?: boolean }, _signal: AbortSignal, _onUpdate: unknown, ctx: any) {
       if (!cfg) cfg = loadConfig(ctx.cwd);
-      if (params?.force) saveState(cfg, { files: {} });
-      if (params?.file) {
-        const abs = path.join(cfg.vaultRoot, params.file);
-        if (!fs.existsSync(abs)) return { content: [{ type: "text", text: `Not found: ${params.file}` }] };
-        scheduleIndex(abs);
-      } else {
-        fullScan();
-      }
       await queue;
+      failures.length = 0;
+      if (params?.file && params?.force) {
+        return { content: [{ type: "text", text: "Choose either file or force=true, not both." }], isError: true };
+      }
+      let requestedAbs: string | undefined;
+      if (params?.file) {
+        const requested = String(params.file);
+        requestedAbs = path.resolve(cfg.vaultRoot, requested);
+        if (path.isAbsolute(requested) || !isWithin(cfg.vaultRoot, requestedAbs) || !isManagedMarkdown(requestedAbs)) {
+          return { content: [{ type: "text", text: `Rejected unmanaged vault path: ${requested}` }], isError: true };
+        }
+        if (!fs.existsSync(requestedAbs)) return { content: [{ type: "text", text: `Not found: ${requested}` }] };
+      }
+      if (rebuildDeferredReason) {
+        return { content: [{ type: "text", text: rebuildDeferredReason }], isError: true };
+      }
+      if (params?.force) {
+        enqueue(() => ensureIndexCompatibility(true));
+        await queue;
+        if (rebuildDeferredReason) {
+          return { content: [{ type: "text", text: rebuildDeferredReason }], isError: true };
+        }
+      }
+      if (requestedAbs) scheduleIndex(requestedAbs);
+      else fullScan();
+      await queue;
+      if (failures.length) {
+        return {
+          content: [{ type: "text", text: `Index failed:\n${failures.map((message) => `- ${message}`).join("\n")}` }],
+          isError: true,
+        };
+      }
       const state = loadState(cfg);
       const total = Object.values(state.files).reduce((n, file) => n + file.chunks, 0);
       return {
