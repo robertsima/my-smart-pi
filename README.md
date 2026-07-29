@@ -1,17 +1,16 @@
 # my-smart-pi
 
-A reusable Pi harness: local + API model switching, Obsidian vault memory with
-embeddings, and context management that degrades gracefully instead of falling
-off a cliff.
+A ready-made setup for [Pi](https://github.com/earendil-works/pi-coding-agent) that gives you:
 
-This README is a setup guide. Start at [Quick start](#quick-start), then use
-[Where do I change things?](#where-do-i-change-things) as your map.
+- **Local and cloud models side by side** — run Qwen on your own GPU, switch to GPT when you need it
+- **Your Obsidian vault as memory** — notes get indexed automatically, and the agent searches them semantically instead of grepping around
+- **Context that degrades gracefully** — long sessions compact smoothly instead of falling off a cliff
+
+It's a bundle of Pi extensions plus the config to wire them together. One script sets it all up.
 
 ---
 
-## Quick start
-
-**Windows:**
+## Get running
 
 ```powershell
 git clone https://github.com/robertsima/my-smart-pi.git
@@ -19,338 +18,225 @@ cd my-smart-pi
 .\bootstrap.ps1
 ```
 
-First run asks three questions — your vault root, any extra directories Pi may
-touch, and which vault subdirectory to keep read-only. Answers save to
-`bootstrap.local.json` (gitignored), so every later run is zero-argument.
+It'll ask you three things:
 
-```powershell
-.\bootstrap.ps1              # re-apply everything
-.\bootstrap.ps1 -Reconfigure # change your answers
-.\bootstrap.ps1 -SkipNpm     # skip dependency install (fast)
-```
+1. **Where's your vault?** — e.g. `D:\Vault`
+2. **What else should Pi be allowed to touch?** — your code folders, usually
+3. **Which vault folder should stay read-only?** — your hand-written notes, so the agent can read but never edit them
 
-Then start Pi, or `/reload` if it was already running. Verify with `pi list` —
-you should see `git:github.com/robertsima/my-smart-pi@main` alongside the npm
-packages.
+Your answers get saved, so from then on `.\bootstrap.ps1` with no arguments re-applies everything. Run it anytime something seems off — it's safe to repeat and it won't overwrite anything you've customised.
 
-**Non-Windows** (no bootstrap script yet — do it by hand):
+Then start Pi. (If it was already running, `/reload`.)
 
-```bash
-pi install git:github.com/robertsima/my-smart-pi@main
-cp config/guardrails/guardrails.example.json ~/.pi/agent/extensions/guardrails.json
-cp config/my-smart-pi.config.example.json    ~/.pi/agent/my-smart-pi.config.json
-cp config/model-switcher.example.json        ~/.pi/agent/model-switcher.json
-cp config/APPEND_SYSTEM.example.md           ~/.pi/agent/APPEND_SYSTEM.md
-```
+> **On a fresh machine, one more step:** if you want local models, open
+> `~/.pi/agent/model-switcher.json` and replace `<PATH_TO_GGUF>` with the path to
+> your actual `.gguf` file. Cloud models work without this.
 
-Replace the `<PLACEHOLDER>` values in each, then `/reload`.
-
-### After a fresh install, do these two things
-
-1. **Set your GGUF path.** A freshly seeded `model-switcher.json` points at
-   `<PATH_TO_GGUF>`. No `llama-local/*` model works until you fix it.
-2. **Check the guardrails allowlist.** Anything outside it is denied *with no
-   prompt*. See [permissions](#permissions--what-pi-may-touch).
+Not on Windows? There's no bootstrap script yet — see [manual setup](#manual-setup).
 
 ---
 
 ## Where do I change things?
 
-| I want to… | File | Field |
-|---|---|---|
-| Change the default model | `~/.pi/agent/settings.json` | `defaultProvider`, `defaultModel` |
-| Change which models show in the picker | `~/.pi/agent/settings.json` | `enabledModels[]` |
-| Change thinking level | `~/.pi/agent/settings.json` | `defaultThinkingLevel` |
-| **Add or tune a local llama model** | `~/.pi/agent/model-switcher.json` | `models.<key>` |
-| **Point at a different GGUF file** | `~/.pi/agent/model-switcher.json` | `models.<key>.command` → `-m` |
-| **Change the embedding model** | `<vaultRoot>/.vault-mind/vault-mind.config.json` | `vaultMind.embedding` |
-| Auto-fallback / per-turn routing | `~/.pi/agent/model-router.json` | `profiles`, `rateLimitFallback` |
-| API model catalog (costs, context sizes) | `~/.pi/agent/models-store.json` | auto-refreshed; rarely hand-edited |
-| Change vault location | `~/.pi/agent/my-smart-pi.config.json` | `vaultRoot` (**both** sections) |
-| Change which folders get indexed | `~/.pi/agent/my-smart-pi.config.json` | `watchRoots`, `collectionRules` |
-| **What Pi may read/write** | `~/.pi/agent/extensions/guardrails.json` | `pathAccess.allowedPaths` |
-| Make notes read-only | `~/.pi/agent/extensions/guardrails.json` | `policies.rules` |
-| The agent's operating policy | `~/.pi/agent/APPEND_SYSTEM.md` | whole file |
-| Compaction behaviour | `~/.pi/agent/settings.json` | `compaction`, `branchSummary` |
-| Credentials | `~/.pi/agent/auth.json` | managed by Pi — never edit by hand |
+Everything lives in `~/.pi/agent/`. Here's the short version:
 
----
+| To change… | Open… |
+|---|---|
+| Which model you start in | `settings.json` → `defaultModel` |
+| Which models appear in the picker | `settings.json` → `enabledModels` |
+| Your local llama models | `model-switcher.json` |
+| **The embedding model** | `<your-vault>/.vault-mind/vault-mind.config.json` |
+| Where your vault is / what gets indexed | `my-smart-pi.config.json` |
+| What Pi is allowed to read and write | `extensions/guardrails.json` |
+| The agent's standing instructions | `APPEND_SYSTEM.md` |
 
-## Config file reference
+The rest of this section explains each one.
 
-Everything lives in `~/.pi/agent/`. Each has a boilerplate under `config/` in
-this repo, so a wiped agent directory is one `bootstrap.ps1` away from working.
-
-### `settings.json` — Pi's main config
-
-Provider, model, context, and the package list. **Merged, never overwritten** by
-bootstrap: your provider/model/auth choices survive re-runs, and a timestamped
-`.bak-` copy is written first.
+### Picking models — `settings.json`
 
 ```jsonc
 {
-  "defaultProvider": "openai-codex",   // which provider to start in
-  "defaultModel": "gpt-5.5",           // which model within it
-  "defaultThinkingLevel": "high",      // off | minimal | low | medium | high | xhigh | max
-  "enabledModels": [                   // what appears in the Ctrl+P picker
-    "llama-local/qwen",                //   <- key from model-switcher.json
-    "openai-codex/gpt-5.5",            //   <- id from models-store.json
-    "ollama/embeddinggemma:latest"
-  ],
-  "compaction": { "enabled": true, "reserveTokens": 8192, "keepRecentTokens": 16000 },
-  "packages": [ /* ... */ ]
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.5",
+  "enabledModels": [
+    "llama-local/qwen",        // from model-switcher.json
+    "openai-codex/gpt-5.5"     // from your provider
+  ]
 }
 ```
 
-Model names are `provider/model`. The `llama-local/*` names come from the keys in
-`model-switcher.json`; the API ones come from `models-store.json`.
+Model names are always `provider/model`. Anything starting with `llama-local/`
+comes from your `model-switcher.json`; the rest come from your cloud provider.
 
-### `model-switcher.json` — your local llama models
+### Local models — `model-switcher.json`
 
-Each entry under `models` is a llama-server launch config. The key is the name
-you reference as `llama-local/<key>`.
+Each entry is one way to launch llama-server. The key becomes the model name:
 
 ```jsonc
-{
-  "server": { "host": "127.0.0.1", "port": 8086 },
-  "defaultModel": "qwen",
-  "models": {
-    "qwen": {                                  // -> llama-local/qwen
-      "name": "Qwen3 30B Coder",
-      "description": "Default / Balanced 54K", // shown in the picker
-      "command": [
-        "llama-server",
-        "-m", "<PATH_TO_GGUF>",   // <- YOUR .gguf file goes here
-        "-ngl", "all",            // layers on GPU ("all", or a number like 33)
-        "--ctx-size", "65536",    // context window
-        "-t", "8", "-tb", "16",   // CPU threads — match your core count
-        "--temp", "0.7",
-        "--port", "8086"
-      ],
-      "contextWindow": 65536,     // must match --ctx-size
-      "maxTokens": 8192
-    }
+"models": {
+  "qwen": {                          // -> you'd select "llama-local/qwen"
+    "name": "Qwen3 30B Coder",
+    "command": [
+      "llama-server",
+      "-m", "<PATH_TO_GGUF>",        // your model file
+      "-ngl", "all",                 // how much to put on the GPU
+      "--ctx-size", "65536",         // context window
+      "-t", "8"                      // CPU threads
+    ],
+    "contextWindow": 65536           // keep this matching --ctx-size
   }
 }
 ```
 
-**To add a model:** copy an existing block, rename the key, change `-m`, and add
-`llama-local/<yourkey>` to `enabledModels` in `settings.json`.
+**Adding a model:** copy a block, rename the key, point `-m` at your file, then
+add `llama-local/<yourkey>` to `enabledModels`.
 
-**Tuning notes:** `-ngl` controls GPU offload — lower it if you run out of VRAM.
-`--cpu-moe` (see the `qwen-lc-cpu-moe` preset) pushes mixture-of-experts layers
-to CPU, trading speed for a much larger context. Keep `contextWindow` in sync
-with `--ctx-size` or Pi will miscount your budget.
+**Running out of VRAM?** Lower `-ngl` (it's the number of layers on the GPU —
+`"all"` or a number like `33`). The included `qwen-lc-cpu-moe` preset shows the
+other lever: `--cpu-moe` pushes some layers to CPU so you can fit much more
+context, at the cost of speed.
 
-### `vault-mind.config.json` — embeddings and collections
+Three presets ship by default — a balanced one, a long-context one, and a
+max-context one. They're tuned for one particular machine, so treat the thread
+counts and layer numbers as starting points.
 
-**This one lives in your vault, not the agent dir:**
-`<vaultRoot>/.vault-mind/vault-mind.config.json`. Its location is declared by
-`vaultMindConfigPath` in `my-smart-pi.config.json`.
+### Embeddings — `vault-mind.config.json`
 
-To change the embedding model:
+This is the one that isn't in `~/.pi/agent/`. It lives **inside your vault**, at
+`<your-vault>/.vault-mind/vault-mind.config.json`:
 
 ```jsonc
-"vaultMind": {
-  "dataDir": "D:/Vault/.lancedb",
-  "embedding": {
-    "provider": "ollama",                     // embedding backend
-    "ollamaModel": "embeddinggemma",          // <- CHANGE THE EMBEDDING MODEL HERE
-    "ollamaHost": "http://127.0.0.1:11434"
-  },
-  "folders": { "inbox": "AI Mind", "journal": "AI Mind/Journal", /* ... */ }
+"embedding": {
+  "provider": "ollama",
+  "ollamaModel": "embeddinggemma",        // <- change this
+  "ollamaHost": "http://127.0.0.1:11434"
 }
 ```
 
-> **Changing the embedding model invalidates your index.** Different models
-> produce different vector dimensions, so existing LanceDB tables under
-> `dataDir` will not match. Re-index with `vault_reindex(force=true)` after
-> switching, and expect it to take a while on a large vault.
+> ⚠️ **Changing the embedding model means re-indexing.** Different models produce
+> differently-shaped vectors, so your existing index won't match the new ones.
+> Run `vault_reindex(force=true)` afterwards and give it time on a big vault.
 
-### `my-smart-pi.config.json` — vault paths and indexing
+### Your vault — `my-smart-pi.config.json`
 
-Read by `vault-autoindex.ts` and `global-vault-collections.ts`. Without it,
-neither can find your vault.
+Tells the harness where your notes are and which folders to index:
 
 ```jsonc
 {
   "vaultAutoindex": {
-    "vaultRoot": "<YOUR_VAULT_ROOT>",
-    "watchRoots": ["Vault Mind", "AI Mind"],   // folders to index
-    "defaultCollection": "notes",
+    "vaultRoot": "D:/Vault",
+    "watchRoots": ["Vault Mind", "AI Mind"],     // folders to index
     "collections": ["notes", "projects"],
-    "collectionRules": [                        // route by path -> collection
+    "collectionRules": [                          // sort notes into collections
       { "pattern": "^(AI Mind|Vault Mind)/Projects/", "collection": "projects" }
-    ],
-    "debounceMs": 2000,
-    "maxChunkChars": 1500
-  },
-  "globalVaultCollections": { "vaultRoot": "<YOUR_VAULT_ROOT>" }
-}
-```
-
-Set `vaultRoot` in **both** sections. For a vault laid out as `Notes/` and
-`Projects/`, use `"watchRoots": ["Notes", "Projects"]` with
-`{ "pattern": "^Projects/", "collection": "projects" }`.
-
-Config is resolved in this order: `MY_SMART_PI_CONFIG` env var →
-`<cwd>/.pi/my-smart-pi.config.json` → `<cwd>/my-smart-pi.config.json` →
-`~/.pi/agent/my-smart-pi.config.json`.
-
-### `extensions/guardrails.json` — permissions
-
-See [permissions](#permissions--what-pi-may-touch) below.
-
-### `APPEND_SYSTEM.md` — the agent's operating policy
-
-Appended to the system prompt. Defines the vault boundary, how to handle personal
-notes, and when to reach for `vm_search` instead of grep. **Losing this file
-produces no error** — the agent just quietly stops following your rules.
-
-### `model-router.json` — automatic model selection *(optional)*
-
-Global at `~/.pi/agent/model-router.json`, per-project at
-`<cwd>/.pi/model-router.json` (project wins). Handles rate-limit fallback and
-per-turn routing.
-
-```jsonc
-{
-  "defaultProfile": "auto",
-  "rateLimitFallback": {
-    "enabled": true,
-    "fallbackSequence": ["llama-local/qwen", "openai-codex/gpt-5.4-mini"]
-  },
-  "largeContextThreshold": 80000,
-  "profiles": {
-    "auto": {
-      "default":  { "model": "llama-local/qwen", "thinking": "off" },
-      "fallback": { "model": "openai-codex/gpt-5.4-mini", "thinking": "medium" }
-    }
-  }
-}
-```
-
-If you're mysteriously pinned to one model, check for a project-scoped copy of
-this file in your current working directory.
-
-### `models-store.json` and `ollama-model-cache.json` — caches
-
-Catalogs of available API and Ollama models, refreshed by
-`@kylebrodeur/pi-model-discovery`. You rarely edit these — but if
-`models-store.json` is empty (`{}`), **model switching silently does nothing**,
-because there is no catalog to switch within.
-
-### `auth.json` — credentials
-
-Managed by Pi. **Never committed here, and nothing in this repo can regenerate
-it.** Back it up separately.
-
----
-
-## Permissions — what Pi may touch
-
-`@aliou/pi-guardrails` reads `~/.pi/agent/extensions/guardrails.json`. This is a
-**userland** allowlist: it is enforced by the extension, not by Windows, so being
-an administrator makes no difference to it.
-
-```jsonc
-{
-  "pathAccess": {
-    "mode": "block",            // "block" = deny silently | "ask" = prompt
-    "allowedPaths": [
-      { "kind": "directory", "path": "D:\\Vault" },
-      { "kind": "directory", "path": "C:\\Users\\you\\.pi" }
     ]
   },
-  "policies": {
-    "rules": [{
-      "id": "vault-source-read-only",
-      "patterns": [{ "pattern": "D:/Vault/Vault Mind" },
-                   { "pattern": "D:/Vault/Vault Mind/**" }],
-      "protection": "readOnly",
-      "enabled": true
-    }]
-  }
+  "globalVaultCollections": { "vaultRoot": "D:/Vault" }
+}
+```
+
+Set `vaultRoot` in **both** places. Different vault layout? Just change
+`watchRoots` and the rules — for a vault with `Notes/` and `Projects/` at the
+top level, use `"watchRoots": ["Notes", "Projects"]` and match on `^Projects/`.
+
+### Permissions — `extensions/guardrails.json`
+
+A list of folders Pi may touch. Anything outside it is refused.
+
+```jsonc
+"pathAccess": {
+  "mode": "block",        // "block" = refuse quietly, "ask" = prompt you
+  "allowedPaths": [
+    { "kind": "directory", "path": "D:\\Vault" },
+    { "kind": "directory", "path": "D:\\Code" }
+  ]
 }
 ```
 
 Two things worth knowing:
 
-- **`mode: "block"` denies with no prompt.** If a tool call fails for no visible
-  reason, check this list first. Use `"ask"` if you'd rather be prompted.
-- **A missing `guardrails.json` is worse than an empty one** — guardrails falls
-  back to onboarding and blocks paths. This is the usual cause of "Pi suddenly
-  lost its permissions" after a reinstall.
+- **This has nothing to do with Windows permissions.** It's enforced by Pi
+  itself, so running as administrator changes nothing here.
+- **`"block"` refuses silently.** If a tool fails for no visible reason, this
+  list is the first thing to check. Switch to `"ask"` if you'd rather be asked.
 
-Add `AppData\Local\npm-cache` and `%TEMP%` to `allowedPaths` if you run
-`npm install` through Pi.
+If you run `npm install` through Pi, add your npm cache and temp folders too.
 
-Note the slash styles differ between the two sections in a known-working config:
-`pathAccess.allowedPaths` uses Windows backslashes, `policies.patterns` uses
-forward slashes. Copy that convention rather than normalising it.
+The second half of the file marks folders read-only — that's how "the agent can
+read my notes but never edit them" is enforced. Note the slash styles differ
+between the two halves (backslashes above, forward slashes in the read-only
+rules); copy the existing style rather than tidying it up.
+
+### Standing instructions — `APPEND_SYSTEM.md`
+
+Plain markdown, appended to the agent's system prompt. Defines the vault
+boundary, how to treat personal notes, and when to search memory instead of
+grepping. Edit it like a document — it's meant to be read.
+
+If this file goes missing you get **no error**; the agent just quietly stops
+following your rules.
+
+### The rest
+
+- **`models-store.json`** and **`ollama-model-cache.json`** — catalogues of
+  available models, refreshed automatically. You won't normally touch these, but
+  if `models-store.json` ever becomes `{}`, model switching silently stops
+  working because there's nothing to switch between.
+- **`model-router.json`** *(optional)* — automatic fallback when you hit a rate
+  limit, and per-turn model routing. If you're ever mysteriously stuck on one
+  model, check whether a copy of this exists in your current project folder — a
+  project-level one overrides the global.
+- **`auth.json`** — your credentials. Managed by Pi, never in this repo, and
+  **nothing here can regenerate it**. Back it up somewhere safe.
 
 ---
 
-## What the extensions do
+## What you get
 
-| Extension | Behaviour |
+| Extension | What it does |
 |---|---|
-| `tapered-context.ts` | Compacts earlier than Pi's default and keeps a bounded raw tail that grows logarithmically. Archives old tool outputs and leaves stubs containing the archive path, so the agent can `read` the original if needed. `/tapered-context [compact]` |
-| `lazy-tools.ts` | Keeps a small always-active tool set and defers the rest behind `load_tools(names=["vault"])`. Groups: `vault`, `admin`, `web`, `context`. Also strips embedding vectors from search results. |
-| `vault-autoindex.ts` | Watches `watchRoots` for changes, chunks notes by heading/paragraph, indexes into vault-mind collections, and prunes stale rows. `vault_reindex(force=false)` |
-| `global-vault-collections.ts` | `vault_collection_search` / `_query` / `_list` / `_status` — vault memory from any working directory. |
-| `session-memory.ts` | Archives settled sessions into a semantic store; adds `session_recall` and friends. State lives under the agent dir, not in this repo. |
+| `tapered-context` | Compacts context gradually instead of all at once. Old tool output gets archived rather than dropped, and the agent can go read it if it needs to. |
+| `lazy-tools` | Keeps the tool list small so the model isn't wading through dozens of schemas. Extra tools load on demand in groups (`vault`, `admin`, `web`, `context`). |
+| `vault-autoindex` | Watches your notes and re-indexes them as you write. |
+| `global-vault-collections` | Lets you search your vault from any folder, not just inside it. |
+| `session-memory` | Remembers past sessions and can recall them semantically. |
 
-Core tools (`read`, `bash`, `edit`, `write`, `ls`, `grep`, `find`,
-`model_switch`, `load_tools`, and the vault collection tools) are always active.
-If the agent claims it cannot run `bash`, that is not lazy-tools — see
-troubleshooting.
-
-Skills included: `defuddle`, `document-session-to-vault`, `json-canvas`,
-`obsidian-bases`, `obsidian-cli`, `obsidian-markdown`.
+Plus skills for Obsidian markdown, canvas, bases, and the Obsidian CLI.
 
 ---
 
-## Troubleshooting
+## If something's broken
 
-| Symptom | Cause |
+| What you're seeing | What it means |
 |---|---|
-| `[pi-llama-switch] No config found at ~/.pi/agent/model-switcher.json` | The file is missing. Re-run `bootstrap.ps1` to seed it, then set your GGUF path. |
-| Model switching does nothing | `models-store.json` is `{}`. Re-run bootstrap; discovery repopulates it. |
-| Paths denied with no prompt | `guardrails.json` missing, or the path isn't in `allowedPaths` with `mode: "block"`. |
-| Agent ignores your rules | `APPEND_SYSTEM.md` is missing. It fails silently. |
-| **Agent insists it's the "Broadcaster" (or Miner/Manager/Heavy-Lifter) and refuses to run `bash`** | pi-vault-mind's identity injector. See below. |
-| Stuck on one model | Check for `<cwd>/.pi/model-router.json` overriding the global profile. |
-| `Port 11435 in use` | An earlier Pi process still holds the vault-mind HTTP server. Indexing still works. |
-| `'pgrep' is not recognized` | `pi-llama-switch` shells out to a Unix command. Harmless noise on Windows; llama-server detection won't work. |
-| `archive snapshot error: ... ctx is stale` under `pi -p` | A shutdown race — Pi disposes the session before `agent_settled` lands. Interactive sessions are unaffected. `pi -p` is a poor smoke test here; it also trips "Agent is already processing". |
-| LanceDB errors after an npm update | `apache-arrow` must stay at `18.1.0`. Tables written under 18 won't open against 21. Bootstrap pins it. |
+| `No config found at ~/.pi/agent/model-switcher.json` | That file is missing. Re-run `bootstrap.ps1`, then set your GGUF path. |
+| Model switching does nothing | Your model catalogue is empty. Re-run `bootstrap.ps1`. |
+| Files won't open, no explanation | The path isn't in your guardrails allowlist. |
+| Agent stops following your instructions | `APPEND_SYSTEM.md` is missing. Re-run `bootstrap.ps1`. |
+| **Agent says it's the "Broadcaster" and won't run commands** | See below — this one's sneaky. |
+| Stuck on one model | Check for a `.pi/model-router.json` in your project folder. |
+| Weird LanceDB errors after an update | `apache-arrow` has to stay at 18.1.0. `bootstrap.ps1` pins it. |
+| `Port 11435 in use` | An older Pi process is still running. Harmless — indexing still works. |
+| `'pgrep' is not recognized` | A Unix command on Windows. Just noise. |
 
-### The forced identity boundary
+### "I'm the Broadcaster agent"
 
-If your agent announces that it is the **Broadcaster** — may read/write/edit and
-search collections, must not run `bash`/`grep`/`find`, must write only under
-`Agent/Presentations/` — it is not confabulating and it is not your
-`APPEND_SYSTEM.md`. It is being told so, every single turn.
+If your agent announces that it may only read, write and search — no `bash`, no
+`grep`, output restricted to `Agent/Presentations/` — it isn't making that up,
+and it isn't your `APPEND_SYSTEM.md`. It's being told so on every single turn.
 
-pi-vault-mind ships four per-role skills (`vault-mind-broadcaster`,
-`-heavy-lifter`, `-manager`, `-miner`). Its identity injector hooks
-`before_agent_start`, scans the loaded skills for one matching
-`vault-mind-<role>`, and appends that role's `IDENTITY BOUNDARY` contract to the
-**system prompt**.
+`pi-vault-mind` includes four specialist sub-agents (Broadcaster, Miner, Manager,
+Heavy-Lifter), each with its own restrictions. They're meant to be picked one at
+a time. But a normal install loads all four, and the code that decides "which one
+am I?" just takes the first it finds — which alphabetically is the Broadcaster,
+the most restrictive of the bunch.
 
-Two things make this hard to diagnose:
+It's a pain to diagnose because the instruction goes into the system prompt,
+which never gets written to your session log. Search your sessions and you'll
+only find the agent's own replies, so it looks like it's imagining things. And
+because it's re-applied every turn, restarting doesn't help.
 
-- The system prompt is **not written to the session JSONL**, so grepping your
-  sessions finds only the model's own replies — it looks self-inflicted.
-- It is re-injected every turn, so it survives restarts, `/reload`, and
-  restoring other config.
-
-Those skills are meant to be chosen one at a time via `--agent vault-mind-<role>`.
-A normal install discovers all four, and the detector takes the **first** match —
-alphabetically `vault-mind-broadcaster`, the most restrictive of the set.
-
-Fix, in `settings.json` (bootstrap adds this for you):
+The fix is already in your `settings.json` if you've run `bootstrap.ps1`:
 
 ```jsonc
 "skills": [
@@ -361,67 +247,80 @@ Fix, in `settings.json` (bootstrap adds this for you):
 ]
 ```
 
-With no role skill loaded the detector returns nothing and no boundary is
-injected. Exclude-only patterns are safe — when the include list is empty every
-other path is kept, so nothing else is disabled. Drop a line to use that role
-agent deliberately.
+With none of them loaded, nothing gets injected and your agent behaves normally.
+Delete a line if you ever want to use that sub-agent deliberately.
 
-**Two things that will bite you:**
+### Two traps
 
-- **Never copy an old `settings.json` onto a new install.** It overwrites the
-  `packages[]` entry `pi install` just wrote and re-introduces dead
-  `extensions[]` paths. Run `bootstrap.ps1` instead.
-- **Write config as UTF-8 without a BOM.** PowerShell 5.1's
-  `Set-Content -Encoding utf8` emits one, and Pi's JSON parser rejects it with
-  `Unexpected token '﻿'` — then falls back to empty config and may overwrite the
-  file with a stub.
+**Don't copy an old `settings.json` onto a new install.** It wipes the package
+list Pi just wrote and points at extensions that no longer exist. Run
+`bootstrap.ps1` instead — it merges rather than replaces.
+
+**Save config as UTF-8 *without* a BOM.** PowerShell's `Set-Content -Encoding utf8`
+adds one, and Pi's JSON parser chokes on it — then falls back to empty config and
+may overwrite your file with a stub. This is not hypothetical; it ate a working
+`settings.json` during development.
 
 ---
 
-## Required packages
+## Manual setup
 
-```json
-[
-  "npm:pi-llama-switch",  "npm:pi-caveman",
-  "npm:@aliou/pi-guardrails", "npm:pi-web-access",
-  "npm:pi-context", "npm:pi-vault-mind",
-  "npm:@kylebrodeur/pi-model-discovery",
-  "npm:@kylebrodeur/pi-model-router",
-  "git:github.com/robertsima/my-smart-pi@main"
-]
-```
-
-Bootstrap installs these and pins `apache-arrow` to `18.1.0`.
-
-Environment variables, all optional:
+No bootstrap script outside Windows yet. By hand:
 
 ```bash
-PI_VAULT_ROOT=/path/to/vault
-MY_SMART_PI_CONFIG=/path/to/my-smart-pi.config.json
-PI_VAULT_MIND_LANCE_JS=/path/to/pi-vault-mind/dist/src/lance.js
-PI_TOOL_OUTPUT_ARCHIVE_DIR=/path/to/tool-output-archive
+pi install git:github.com/robertsima/my-smart-pi@main
+
+cp config/guardrails/guardrails.example.json ~/.pi/agent/extensions/guardrails.json
+cp config/my-smart-pi.config.example.json    ~/.pi/agent/my-smart-pi.config.json
+cp config/model-switcher.example.json        ~/.pi/agent/model-switcher.json
+cp config/APPEND_SYSTEM.example.md           ~/.pi/agent/APPEND_SYSTEM.md
 ```
+
+Replace the `<PLACEHOLDER>` values in each, then `/reload`. Check it worked with
+`pi list`.
+
+You'll also want these packages, which bootstrap would have installed:
+`pi-llama-switch`, `pi-caveman`, `@aliou/pi-guardrails`, `pi-web-access`,
+`pi-context`, `pi-vault-mind`, `@kylebrodeur/pi-model-discovery`,
+`@kylebrodeur/pi-model-router` — and `apache-arrow` pinned to exactly `18.1.0`.
+
+Optional environment variables: `PI_VAULT_ROOT`, `MY_SMART_PI_CONFIG`,
+`PI_VAULT_MIND_LANCE_JS`, `PI_TOOL_OUTPUT_ARCHIVE_DIR`.
 
 ---
 
-## Safety model
+## Recovering a broken setup
 
-Safe to share publicly. Contains harness code and sanitized example config only —
-no API keys or auth files, no vault contents, no LanceDB/`.vault-mind` state, no
-session logs, no tool-output archives, and no machine-specific allowlists.
+Every config file has a template in `config/`, so a wiped `~/.pi/agent/` is one
+command away from working again:
 
-Review extensions before installing; Pi extensions run with your user's
-permissions.
+```powershell
+.\bootstrap.ps1
+```
 
-## Development
+It only replaces files that are **missing or empty**. Anything you've customised
+is left alone, and anything it does replace gets backed up first.
+
+The one exception is `auth.json` — that's your credentials, it's deliberately not
+in this repo, and nothing here can bring it back. Keep your own copy.
+
+---
+
+## Sharing and safety
+
+This repo is safe to make public. It contains code and example config only — no
+API keys, no vault contents, no search indexes, no session logs, and no personal
+file paths. Your own paths live in `bootstrap.local.json`, which is gitignored.
+
+Pi extensions run with your user's permissions, so read them before installing —
+mine or anyone's.
+
+## Working on it
 
 ```bash
 git clone https://github.com/robertsima/my-smart-pi.git
 cd my-smart-pi && git switch -c my-change
 
-pi -e ./extensions/tapered-context.ts   # test one extension
-pi install /absolute/path/to/my-smart-pi && /reload   # test the whole package
+pi -e ./extensions/tapered-context.ts              # try one extension
+pi install /absolute/path/to/my-smart-pi && /reload # try the whole thing
 ```
-
-Keep personal paths in `bootstrap.local.json` or local config, never in Git.
-`.gitignore` already excludes known state, index, and archive paths.
