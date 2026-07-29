@@ -314,6 +314,28 @@ $live = @($exts | Where-Object { $_ -and (Test-Path $_) })
 if ($dead.Count) { foreach ($d in $dead) { Warn "pruned missing extension: $d" } }
 $s | Add-Member -NotePropertyName extensions -NotePropertyValue @($live) -Force
 
+# pi-vault-mind ships four per-role skills (vault-mind-broadcaster / -heavy-lifter
+# / -manager / -miner). Its identity-injector hooks before_agent_start, scans
+# systemPromptOptions.skills for /^vault-mind-(...)$/ and appends that role's
+# "IDENTITY BOUNDARY" contract to the system prompt. Those skills are meant to be
+# selected one at a time via `--agent vault-mind-<role>`, but a normal install
+# discovers all four, and detectRole returns the FIRST match -- alphabetically
+# vault-mind-broadcaster, the most restrictive of the set. The session is then
+# told it may not run bash/grep/find and may only write under Agent/Presentations/.
+# Exclude-only patterns are safe here: applyPatterns keeps all paths when the
+# include list is empty. Drop these entries to use the role agents deliberately.
+$roleSkills = @(
+  '!vault-mind-broadcaster'
+  '!vault-mind-heavy-lifter'
+  '!vault-mind-manager'
+  '!vault-mind-miner'
+)
+$skills = @()
+if ($s.PSObject.Properties['skills']) { $skills = @($s.skills) }
+foreach ($rs in $roleSkills) { if ($skills -notcontains $rs) { $skills = @($skills) + $rs } }
+$s | Add-Member -NotePropertyName skills -NotePropertyValue @($skills) -Force
+Ok "vault-mind role skills excluded (prevents forced identity boundary)"
+
 # Last line of defence. This script only ever adds or rewrites `packages` and
 # `extensions`; if the object about to be written has lost any other key that
 # was on disk, something upstream corrupted it and writing would destroy the

@@ -318,12 +318,53 @@ Skills included: `defuddle`, `document-session-to-vault`, `json-canvas`,
 | `[pi-llama-switch] No config found at ~/.pi/agent/model-switcher.json` | The file is missing. Re-run `bootstrap.ps1` to seed it, then set your GGUF path. |
 | Model switching does nothing | `models-store.json` is `{}`. Re-run bootstrap; discovery repopulates it. |
 | Paths denied with no prompt | `guardrails.json` missing, or the path isn't in `allowedPaths` with `mode: "block"`. |
-| Agent ignores your rules, or claims odd restrictions | `APPEND_SYSTEM.md` is missing. It fails silently, and the agent may describe itself using unrelated agent definitions from its context — including tool limits it doesn't actually have. |
+| Agent ignores your rules | `APPEND_SYSTEM.md` is missing. It fails silently. |
+| **Agent insists it's the "Broadcaster" (or Miner/Manager/Heavy-Lifter) and refuses to run `bash`** | pi-vault-mind's identity injector. See below. |
 | Stuck on one model | Check for `<cwd>/.pi/model-router.json` overriding the global profile. |
 | `Port 11435 in use` | An earlier Pi process still holds the vault-mind HTTP server. Indexing still works. |
 | `'pgrep' is not recognized` | `pi-llama-switch` shells out to a Unix command. Harmless noise on Windows; llama-server detection won't work. |
 | `archive snapshot error: ... ctx is stale` under `pi -p` | A shutdown race — Pi disposes the session before `agent_settled` lands. Interactive sessions are unaffected. `pi -p` is a poor smoke test here; it also trips "Agent is already processing". |
 | LanceDB errors after an npm update | `apache-arrow` must stay at `18.1.0`. Tables written under 18 won't open against 21. Bootstrap pins it. |
+
+### The forced identity boundary
+
+If your agent announces that it is the **Broadcaster** — may read/write/edit and
+search collections, must not run `bash`/`grep`/`find`, must write only under
+`Agent/Presentations/` — it is not confabulating and it is not your
+`APPEND_SYSTEM.md`. It is being told so, every single turn.
+
+pi-vault-mind ships four per-role skills (`vault-mind-broadcaster`,
+`-heavy-lifter`, `-manager`, `-miner`). Its identity injector hooks
+`before_agent_start`, scans the loaded skills for one matching
+`vault-mind-<role>`, and appends that role's `IDENTITY BOUNDARY` contract to the
+**system prompt**.
+
+Two things make this hard to diagnose:
+
+- The system prompt is **not written to the session JSONL**, so grepping your
+  sessions finds only the model's own replies — it looks self-inflicted.
+- It is re-injected every turn, so it survives restarts, `/reload`, and
+  restoring other config.
+
+Those skills are meant to be chosen one at a time via `--agent vault-mind-<role>`.
+A normal install discovers all four, and the detector takes the **first** match —
+alphabetically `vault-mind-broadcaster`, the most restrictive of the set.
+
+Fix, in `settings.json` (bootstrap adds this for you):
+
+```jsonc
+"skills": [
+  "!vault-mind-broadcaster",
+  "!vault-mind-heavy-lifter",
+  "!vault-mind-manager",
+  "!vault-mind-miner"
+]
+```
+
+With no role skill loaded the detector returns nothing and no boundary is
+injected. Exclude-only patterns are safe — when the include list is empty every
+other path is kept, so nothing else is disabled. Drop a line to use that role
+agent deliberately.
 
 **Two things that will bite you:**
 
