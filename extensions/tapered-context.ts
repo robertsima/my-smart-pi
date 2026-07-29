@@ -37,6 +37,13 @@ const TOOL_OUTPUT_ARCHIVE_ROOT = join(
 
 const TOOL_STUB_PREFIX = "[Tool output archived]";
 
+// How many messages of un-redacted history to let build up before the redaction
+// boundary moves. Redacting the newest eligible tool result on every request
+// rewrote the prompt just behind the tail each time, so the provider's cached
+// prefix ended there and everything after it was re-billed. Moving the boundary
+// in batches keeps the serialized history identical in between.
+const REDACT_BATCH_MESSAGES = 20;
+
 type ToolOutputArchive = {
   path: string;
   chars: number;
@@ -211,11 +218,13 @@ function triggerCompaction(ctx: ExtensionContext, reason: string, onSettled?: ()
 export default function (pi: ExtensionAPI) {
   let previousTokens: number | null = null;
   let compactionQueued = false;
+  let redactBoundary = 0;
   const archivedToolOutputs = new Map<string, ToolOutputArchive>();
 
   pi.on("session_start", (_event, ctx) => {
     previousTokens = null;
     compactionQueued = false;
+    redactBoundary = 0;
     if (ctx.hasUI) ctx.ui.setStatus(EXT_NAME, "taper on");
   });
 
@@ -253,6 +262,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_compact", (_event, ctx) => {
     previousTokens = null;
     compactionQueued = false;
+    redactBoundary = 0; // compaction renumbers the messages the boundary indexes into
     if (ctx.hasUI) ctx.ui.setStatus(EXT_NAME, "taper on");
   });
 
@@ -279,7 +289,12 @@ export default function (pi: ExtensionAPI) {
     }
     if (lastAssistantIndex < 0) return;
 
-    for (let i = 0; i < lastAssistantIndex; i++) {
+    // Advance the boundary only in batches, and never past what is already
+    // redacted, so the prefix stays byte-identical between advances.
+    if (lastAssistantIndex - redactBoundary >= REDACT_BATCH_MESSAGES) redactBoundary = lastAssistantIndex;
+    const boundary = Math.min(redactBoundary, lastAssistantIndex);
+
+    for (let i = 0; i < boundary; i++) {
       if (messages[i]?.role === "toolResult") await redactToolResult(ctx, messages[i], archivedToolOutputs);
     }
 

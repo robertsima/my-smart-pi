@@ -153,12 +153,17 @@ A list of folders Pi may touch. Anything outside it is refused.
 }
 ```
 
-Two things worth knowing:
+Three things worth knowing:
 
 - **This has nothing to do with Windows permissions.** It's enforced by Pi
   itself, so running as administrator changes nothing here.
 - **`"block"` refuses silently.** If a tool fails for no visible reason, this
   list is the first thing to check. Switch to `"ask"` if you'd rather be asked.
+- **Keep the `/dev/null` entry.** Guardrails checks every shell redirect target
+  as a path, and on Windows `2>/dev/null` resolves against the current drive —
+  so a command run from `D:\` gets refused with
+  `Access to D:\dev\null is blocked`. The grant is a `"file"` entry, so it
+  resolves the same way and matches on whichever drive you're on.
 
 If you run `npm install` through Pi, add your npm cache and temp folders too.
 
@@ -212,6 +217,8 @@ Plus skills for Obsidian markdown, canvas, bases, and the Obsidian CLI.
 | `No config found at ~/.pi/agent/model-switcher.json` | That file is missing. Re-run `bootstrap.ps1`, then set your GGUF path. |
 | Model switching does nothing | Your model catalogue is empty. Re-run `bootstrap.ps1`. |
 | Files won't open, no explanation | The path isn't in your guardrails allowlist. |
+| `Access to D:\dev\null is blocked` | A `2>/dev/null` in a command. Your allowlist needs the `/dev/null` entry — see [Permissions](#permissions--extensionsguardrailsjson). |
+| `400 ... unexpected tool_use_id found in tool_result blocks` | Something reordered the messages mid-tool-call. Fixed in `session-memory.ts`; if it comes back, suspect an extension's `context` handler. |
 | Agent stops following your instructions | `APPEND_SYSTEM.md` is missing. Re-run `bootstrap.ps1`. |
 | **Agent says it's the "Broadcaster" and won't run commands** | See below — this one's sneaky. |
 | Stuck on one model | Check for a `.pi/model-router.json` in your project folder. |

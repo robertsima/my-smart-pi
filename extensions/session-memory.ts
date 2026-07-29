@@ -64,6 +64,7 @@ type Config = {
     minTurns: number;
     headTurns: number;
     tailTurns: number;
+    pruneStepTurns: number;
     recall: boolean;
     recallLimit: number;
     recallMaxChars: number;
@@ -125,6 +126,10 @@ const defaultConfig = (): Config => {
       minTurns: 14,
       headTurns: 1,
       tailTurns: 8,
+      // How far the prune boundary jumps when it moves. Advancing it one turn
+      // per request would rewrite the middle of the prompt every time and void
+      // the provider's cached prefix; moving in steps keeps it stable in between.
+      pruneStepTurns: 6,
       recall: true,
       recallLimit: 5,
       recallMaxChars: 7000,
@@ -253,11 +258,6 @@ const groupMessageTurns = <T extends any>(items: T[], getRole: (x: T) => string 
   return turns;
 };
 
-const selectedEdgeTurns = <T>(turns: T[][], head: number, tail: number): T[] => {
-  if (turns.length <= head + tail) return turns.flat();
-  return [...turns.slice(0, head), ...turns.slice(Math.max(head, turns.length - tail))].flat();
-};
-
 const loadIndexedEntryIds = (cfg: Config, collection: string): Set<string> => {
   const ids = new Set<string>();
   const file = collectionPath(cfg, collection);
@@ -344,6 +344,20 @@ const makeRecallMessage = (text: string) => ({
   content: [{ type: "text", text }],
 });
 
+const plainText = (msg: any): string => {
+  const content = msg?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((p: any) => (p?.type === "text" ? String(p.text ?? "") : "")).join("\n");
+};
+
+/**
+ * Stable identity for a user message: its text plus which repeat of that text
+ * it is. Recall blocks are pinned to this instead of to an array position, so
+ * an injected block lands in the same slot on every request of the session.
+ */
+const anchorKey = (text: string, occurrence: number): string => `${hash(text)}#${occurrence}`;
+
 const formatRecall = (rows: any[], cfg: Config): string => {
   if (!rows?.length) return "";
   const lines: string[] = [
@@ -372,6 +386,16 @@ export default async function (pi: any) {
   let indexed = loadIndexedEntryIds(cfg, cfg.archive.collection);
   let archiveQueue: Promise<void> = Promise.resolve();
   let pendingRecall = "";
+  let pendingRecallAnchor = "";
+
+  // Every recall block injected this session, keyed by the user message it was
+  // retrieved for. Replayed in full on each request so past turns serialize
+  // byte-identically to the last one -- see the context handler.
+  const recallByAnchor = new Map<string, string>();
+
+  // First middle turn still kept in context. Held steady between advances.
+  let pruneAnchorTurn = 0;
+  let lastTurnCount = 0;
 
   const log = (msg: string) => console.log(`[${EXT}] ${msg}`);
 
@@ -498,12 +522,14 @@ export default async function (pi: any) {
 
   pi.on("before_agent_start", async (event: any) => {
     pendingRecall = "";
+    pendingRecallAnchor = "";
     if (!cfg.enabled || !cfg.context.recall) return;
     const q = String(event?.prompt ?? "").trim();
     if (q.length < 8) return;
     try {
       const rows = await search(q, cfg.context.recallLimit, cfg.archive.collection);
       pendingRecall = formatRecall(rows, cfg);
+      pendingRecallAnchor = q;
     } catch (e: any) {
       log(`recall error: ${e?.message ?? e}`);
     }
@@ -515,16 +541,66 @@ export default async function (pi: any) {
 
     if (cfg.context.enabled) {
       const turns = groupMessageTurns(messages, (m: any) => m?.role);
+
+      // A compaction, fork, or session switch renumbers the turns, so a boundary
+      // carried over from the longer history would cut in the wrong place.
+      if (turns.length < lastTurnCount) pruneAnchorTurn = 0;
+      lastTurnCount = turns.length;
+
       if (turns.length > cfg.context.minTurns) {
-        messages = selectedEdgeTurns(turns, cfg.context.headTurns, cfg.context.tailTurns);
+        const head = cfg.context.headTurns;
+        const step = Math.max(1, cfg.context.pruneStepTurns);
+        const target = Math.max(head, turns.length - cfg.context.tailTurns);
+        // Only move the boundary in whole steps. Recomputing it every request
+        // dropped one more turn each time, which changed the middle of the
+        // prompt and re-billed the entire tail behind it as a cache miss.
+        if (pruneAnchorTurn <= head || target - pruneAnchorTurn >= step) pruneAnchorTurn = target;
+        if (pruneAnchorTurn > head) {
+          messages = [...turns.slice(0, head), ...turns.slice(pruneAnchorTurn)].flat();
+        }
+      } else {
+        pruneAnchorTurn = 0;
       }
     }
 
+    // Pin this turn's recall to the user message it was retrieved for, then
+    // replay every recall the session has produced in its own anchored slot.
+    // A block is inserted *before* its user message: the request stays the last
+    // thing the model reads, and a user-role message can never land between an
+    // assistant tool call and its tool results (which is what produced the
+    // "unexpected tool_use_id ... no corresponding tool_use" 400s -- the old
+    // code inserted at length-1, i.e. on top of a pending toolResult).
+    const occurrences = new Map<string, number>();
+    const keys: (string | undefined)[] = messages.map((m: any) => {
+      if (m?.role !== "user") return undefined;
+      const text = plainText(m);
+      const n = occurrences.get(text) ?? 0;
+      occurrences.set(text, n + 1);
+      return anchorKey(text, n);
+    });
+
     if (pendingRecall) {
-      // Put recall before tail so user's latest request remains visible after it
-      // in most provider serializations, while preserving full turns around it.
-      messages = [...messages.slice(0, -1), makeRecallMessage(pendingRecall), ...messages.slice(-1)];
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (!keys[i]) continue;
+        if (plainText(messages[i]).trim() === pendingRecallAnchor) {
+          recallByAnchor.set(keys[i] as string, pendingRecall);
+        }
+        break;
+      }
+      pendingRecall = "";
+      pendingRecallAnchor = "";
     }
+
+    if (recallByAnchor.size) {
+      const out: any[] = [];
+      for (let i = 0; i < messages.length; i++) {
+        const recall = keys[i] ? recallByAnchor.get(keys[i] as string) : undefined;
+        if (recall) out.push(makeRecallMessage(recall));
+        out.push(messages[i]);
+      }
+      messages = out;
+    }
+
     return { messages };
   });
 

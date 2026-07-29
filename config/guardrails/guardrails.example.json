@@ -9,6 +9,10 @@
     "mode": "block",
     "allowedPaths": [
       {
+        "kind": "file",
+        "path": "/dev/null"
+      },
+      {
         "kind": "directory",
         "path": "<YOUR_VAULT_ROOT>"
       },

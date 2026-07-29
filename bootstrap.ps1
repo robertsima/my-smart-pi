@@ -206,9 +206,14 @@ $guard = [ordered]@{
     completedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
   }
   features = [ordered]@{ pathAccess = $true; policies = $true }
+  # The /dev/null grant is not optional on Windows. Guardrails checks every shell
+  # redirect target as a path, and `2>/dev/null` resolves against the current
+  # drive -- so without it any command using it dies with "Access to D:\dev\null
+  # is blocked". It is stored as a `file` grant because grants are resolved the
+  # same way, which makes it match on whichever drive the cwd happens to be on.
   pathAccess = [ordered]@{
     mode         = 'block'
-    allowedPaths = @($allowed | ForEach-Object { [ordered]@{ kind = 'directory'; path = $_ } })
+    allowedPaths = @([ordered]@{ kind = 'file'; path = '/dev/null' }) + @($allowed | ForEach-Object { [ordered]@{ kind = 'directory'; path = $_ } })
   }
 }
 
@@ -232,6 +237,7 @@ if ($ReadOnlySubdir) {
 $guardPath = Join-Path $ExtDir 'guardrails.json'
 if (Test-Path $guardPath) { Copy-Item $guardPath "$guardPath.bak-$Stamp" }
 Write-Json $guardPath $guard
+Ok 'allow /dev/null (shell redirects)'
 foreach ($p in $allowed) { Ok "allow $p" }
 if ($ReadOnlySubdir) { Ok "read-only $vaultFwd/$ReadOnlySubdir" }
 
