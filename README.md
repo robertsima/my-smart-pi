@@ -262,6 +262,37 @@ Delete a line if you ever want to use that sub-agent deliberately.
 > there looks right and silently does nothing. Also never use an empty array:
 > pi reads that as "disable every skill in this package".
 
+#### It can come back after you've fixed it
+
+If the boundary returns in brand-new sessions even with the filter in place,
+check your **vault**, not your config.
+
+While the boundary was active, the agent wrote notes — into
+`AI Mind/Agent/Presentations/`, because that's where the Broadcaster is told to
+put things — and some of those notes describe the restriction as fact
+("Broadcaster boundary blocks direct repo edit/commit"). Those notes get
+auto-indexed, recalled into later sessions, and the agent reads its own old
+description and puts the costume back on. The original cause is gone; the
+residue re-infects.
+
+Search your vault for the role name and reword anything you find:
+
+```powershell
+Get-ChildItem <vault> -Recurse -Include *.md |
+  Select-String "Broadcaster" -SimpleMatch
+```
+
+Then re-index so the stale rows go away:
+
+```text
+vault_reindex(force=true)
+```
+
+Worth knowing generally: **anything the agent writes about its own limits
+becomes training material for its future self.** A wrong note about
+capabilities is stickier than a wrong config, because config gets fixed once
+and notes get recalled forever.
+
 ### Two traps
 
 **Don't copy an old `settings.json` onto a new install.** It wipes the package
