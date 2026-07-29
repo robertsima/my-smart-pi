@@ -6,10 +6,12 @@ import type {
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { prepareCompaction } from "@earendil-works/pi-coding-agent";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 const EXT_NAME = "tapered-context";
+
+const AGENT_DIR = process.env.PI_AGENT_DIR || join(process.env.USERPROFILE || process.env.HOME || process.cwd(), ".pi", "agent");
 
 const MIN_TRIGGER_TOKENS = 32_000;
 const MAX_TRIGGER_TOKENS = 72_000;
@@ -30,10 +32,31 @@ const SUMMARY_FOCUS = [
   "If previous summary exists, merge it without expanding stale detail. Current active work and unresolved risks matter most.",
 ].join(" ");
 
-const TOOL_OUTPUT_ARCHIVE_ROOT = join(
-  process.env.PI_AGENT_DIR || join(process.env.USERPROFILE || process.env.HOME || process.cwd(), ".pi", "agent"),
-  "tool-output-archive",
-);
+const TOOL_OUTPUT_ARCHIVE_ROOT = join(AGENT_DIR, "tool-output-archive");
+const SETTINGS_PATH = join(AGENT_DIR, "settings.json");
+
+// Mirrors agent-session.ts's own compact() defaults so our pre-check predicts
+// the same outcome the core would reach with its static (non-tapered) settings.
+const CORE_COMPACTION_FALLBACK: CompactionSettings = { enabled: true, reserveTokens: 8_192, keepRecentTokens: 16_000 };
+let cachedCoreCompactionSettings: CompactionSettings | null = null;
+
+// The core's compact() runs prepareCompaction() with these *static* settings
+// before session_before_compact ever fires, so it can throw "Nothing to
+// compact (session too small)" before our dynamic policy gets a say. Reading
+// the same settings.json lets us predict that outcome and skip triggering
+// altogether, instead of calling ctx.compact() and having it abort the
+// in-flight turn (busting the prompt cache) only to fail anyway.
+async function getCoreCompactionSettings(): Promise<CompactionSettings> {
+  if (cachedCoreCompactionSettings) return cachedCoreCompactionSettings;
+  try {
+    const raw = await readFile(SETTINGS_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    cachedCoreCompactionSettings = { ...CORE_COMPACTION_FALLBACK, ...(parsed?.compaction ?? {}) };
+  } catch {
+    cachedCoreCompactionSettings = CORE_COMPACTION_FALLBACK;
+  }
+  return cachedCoreCompactionSettings;
+}
 
 const TOOL_STUB_PREFIX = "[Tool output archived]";
 
@@ -301,7 +324,7 @@ export default function (pi: ExtensionAPI) {
     return { messages };
   });
 
-  pi.on("turn_end", (_event, ctx) => {
+  pi.on("turn_end", async (_event, ctx) => {
     const usage = ctx.getContextUsage();
     const currentTokens = usage?.tokens;
     if (!currentTokens || !Number.isFinite(currentTokens)) return;
@@ -326,6 +349,10 @@ export default function (pi: ExtensionAPI) {
     const branch = ctx.sessionManager.getBranch();
     if (lastEntryIsCompaction(branch)) return;
 
+    const coreSettings = await getCoreCompactionSettings();
+    if (coreSettings.enabled === false) return;
+    if (!prepareCompaction(branch, coreSettings)) return;
+
     compactionQueued = true;
     triggerCompaction(ctx, `at ${formatTokens(currentTokens)} > ${formatTokens(policy.triggerTokens)}`, () => {
       compactionQueued = false;
@@ -341,6 +368,12 @@ export default function (pi: ExtensionAPI) {
       const command = args.trim().toLowerCase();
 
       if (command === "compact") {
+        const coreSettings = await getCoreCompactionSettings();
+        const branch = ctx.sessionManager.getBranch();
+        if (coreSettings.enabled === false || !prepareCompaction(branch, coreSettings)) {
+          ctx.ui.notify(`${EXT_NAME}: nothing to compact (session too small)`, "info");
+          return;
+        }
         compactionQueued = true;
         triggerCompaction(ctx, "manual tapered request", () => {
           compactionQueued = false;
