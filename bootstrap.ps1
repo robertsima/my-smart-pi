@@ -217,10 +217,21 @@ if ($ReadOnlySubdir) { Ok "read-only $vaultFwd/$ReadOnlySubdir" }
 # Merge, never clobber: settings.json holds provider/model/auth/context prefs
 # that this package knows nothing about.
 Step 'Updating settings.json'
+$beforeKeys = @()
 if (Test-Path $Settings) {
   Copy-Item $Settings "$Settings.bak-$Stamp"
   Ok "backup -> settings.json.bak-$Stamp"
-  $s = Get-Content $Settings -Raw | ConvertFrom-Json
+  # A parse failure must abort, never fall through to the empty-object branch:
+  # writing {} over a real settings.json destroys provider/model/auth config.
+  try {
+    $s = Get-Content $Settings -Raw -Encoding UTF8 | ConvertFrom-Json
+  } catch {
+    throw ("settings.json exists but could not be parsed: $($_.Exception.Message). " +
+           "Fix or remove it before re-running; it has NOT been modified.")
+  }
+  if ($null -eq $s) { throw "settings.json parsed to null; refusing to continue." }
+  $beforeKeys = @($s.PSObject.Properties.Name)
+  Ok "read $($beforeKeys.Count) existing key(s)"
 } else {
   Warn 'No settings.json found; creating a minimal one.'
   $s = [pscustomobject]@{}
@@ -238,11 +249,15 @@ $requiredPkgs = @(
   $PkgRef
 )
 
+# EVERY Where-Object result below is wrapped in @(). A pipeline that yields a
+# single item collapses to a bare String, and `$string += 'x'` concatenates
+# instead of appending -- that silently fuses the whole packages array into one
+# run-on entry. A zero-item result collapses to $null, which does the same.
 $pkgs = @()
 if ($s.PSObject.Properties['packages']) { $pkgs = @($s.packages) }
 # Drop any my-smart-pi entry pinned to a different ref before adding ours.
-$pkgs = $pkgs | Where-Object { $_ -notlike 'git:github.com/robertsima/my-smart-pi@*' }
-foreach ($p in $requiredPkgs) { if ($pkgs -notcontains $p) { $pkgs += $p } }
+$pkgs = @($pkgs | Where-Object { $_ -notlike 'git:github.com/robertsima/my-smart-pi@*' })
+foreach ($p in $requiredPkgs) { if ($pkgs -notcontains $p) { $pkgs = @($pkgs) + $p } }
 $s | Add-Member -NotePropertyName packages -NotePropertyValue @($pkgs) -Force
 Ok "packages: $($pkgs.Count) entries (incl. $PkgRef)"
 
@@ -250,11 +265,20 @@ Ok "packages: $($pkgs.Count) entries (incl. $PkgRef)"
 # left in settings.extensions that no longer exists is a load error at startup.
 $exts = @()
 if ($s.PSObject.Properties['extensions']) { $exts = @($s.extensions) }
-$dead = $exts | Where-Object { $_ -and -not (Test-Path $_) }
-$live = $exts | Where-Object { $_ -and (Test-Path $_) }
-if ($dead) { foreach ($d in $dead) { Warn "pruned missing extension: $d" } }
+$dead = @($exts | Where-Object { $_ -and -not (Test-Path $_) })
+$live = @($exts | Where-Object { $_ -and (Test-Path $_) })
+if ($dead.Count) { foreach ($d in $dead) { Warn "pruned missing extension: $d" } }
 $s | Add-Member -NotePropertyName extensions -NotePropertyValue @($live) -Force
 
+# Last line of defence. This script only ever adds or rewrites `packages` and
+# `extensions`; if the object about to be written has lost any other key that
+# was on disk, something upstream corrupted it and writing would destroy the
+# user's provider/model/auth config. Refuse rather than clobber.
+$missing = @($beforeKeys | Where-Object { $s.PSObject.Properties.Name -notcontains $_ })
+if ($missing.Count) {
+  throw ("Refusing to write settings.json: would drop $($missing.Count) key(s): $($missing -join ', '). " +
+         "Your original is intact at $Settings.bak-$Stamp")
+}
 Write-Json $Settings $s
 
 # --------------------------------------------------------------------- 5. npm
