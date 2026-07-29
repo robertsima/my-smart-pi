@@ -244,10 +244,10 @@ plain string into an object. `bootstrap.ps1` does this for you:
   {
     "source": "npm:pi-vault-mind",
     "skills": [
-      "!vault-mind-broadcaster",
-      "!vault-mind-heavy-lifter",
-      "!vault-mind-manager",
-      "!vault-mind-miner"
+      "!skills/vault-mind-broadcaster/**",
+      "!skills/vault-mind-heavy-lifter/**",
+      "!skills/vault-mind-manager/**",
+      "!skills/vault-mind-miner/**"
     ]
   }
 ]
@@ -261,6 +261,29 @@ Delete a line if you ever want to use that sub-agent deliberately.
 > touches skills that came from an installed package, so putting the patterns
 > there looks right and silently does nothing. Also never use an empty array:
 > pi reads that as "disable every skill in this package".
+
+There is a second leak: `pi-vault-mind`'s extension also exposes its whole
+`skills/` directory through `resources_discover`, bypassing package filters.
+`bootstrap.ps1` patches the installed `dist/src/index.js` to skip only the four
+role skills there and disables the identity injector in normal sessions.
+
+### Cache miss after a few minutes idle
+
+Pi's default prompt cache retention is short. If you see notices like:
+
+```text
+Cache miss after 9m idle: 77k tokens re-billed
+```
+
+set long cache retention:
+
+```powershell
+[Environment]::SetEnvironmentVariable('PI_CACHE_RETENTION', 'long', 'User')
+```
+
+Then restart the terminal and Pi. `bootstrap.ps1` now does this automatically.
+Long retention maps to OpenAI 24h prompt cache and Anthropic 1h prompt cache
+where the provider/model supports it.
 
 #### It can come back after you've fixed it
 

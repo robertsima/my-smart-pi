@@ -17,6 +17,9 @@
   settings.json is merged, never overwritten -- your provider, model, auth
   and context prefs are preserved. A timestamped backup is written first.
 
+  It also sets PI_CACHE_RETENTION=long at user scope so OpenAI prompt cache
+  retention is 24h instead of in-memory/short retention.
+
   Machine-specific paths are not baked into this script. They come from
   bootstrap.local.json (gitignored) next to this file, or from parameters, or
   from an interactive prompt on first run. Answers are saved back to
@@ -42,6 +45,9 @@
 .PARAMETER Reconfigure
   Ignore saved answers and prompt again.
 
+.PARAMETER SkipLongCacheRetention
+  Do not set the user-level PI_CACHE_RETENTION=long environment variable.
+
 .EXAMPLE
   .\bootstrap.ps1
 .EXAMPLE
@@ -54,7 +60,8 @@ param(
   [string]   $ReadOnlySubdir,
   [string]   $Ref = 'main',
   [switch]   $SkipNpm,
-  [switch]   $Reconfigure
+  [switch]   $Reconfigure,
+  [switch]   $SkipLongCacheRetention
 )
 
 $ErrorActionPreference = 'Stop'
@@ -126,6 +133,21 @@ if (-not $pi) {
   throw "pi not found on PATH. Install it first: npm i -g @earendil-works/pi-coding-agent"
 }
 Ok "pi $(& pi --version 2>$null | Select-Object -First 1) at $($pi.Source)"
+
+if (-not $SkipLongCacheRetention) {
+  Step 'Setting long prompt cache retention'
+  $currentCacheRetention = [Environment]::GetEnvironmentVariable('PI_CACHE_RETENTION', 'User')
+  if ($currentCacheRetention -ne 'long') {
+    [Environment]::SetEnvironmentVariable('PI_CACHE_RETENTION', 'long', 'User')
+    $env:PI_CACHE_RETENTION = 'long'
+    Ok 'PI_CACHE_RETENTION=long (new terminals get OpenAI 24h / Anthropic 1h prompt cache)'
+  } else {
+    $env:PI_CACHE_RETENTION = 'long'
+    Ok 'PI_CACHE_RETENTION already long'
+  }
+} else {
+  Warn 'Skipped long prompt cache retention (-SkipLongCacheRetention)'
+}
 
 if (-not (Test-Path $AgentDir)) { New-Item -ItemType Directory -Force -Path $AgentDir | Out-Null }
 if (-not (Test-Path $ExtDir))   { New-Item -ItemType Directory -Force -Path $ExtDir   | Out-Null }
@@ -341,11 +363,17 @@ $s | Add-Member -NotePropertyName extensions -NotePropertyValue @($live) -Force
 # this package". Exclude-only patterns are safe -- an empty include list keeps
 # everything else.
 $vmSkillFilter = @(
+  '!skills/vault-mind-broadcaster/**'
+  '!skills/vault-mind-heavy-lifter/**'
+  '!skills/vault-mind-manager/**'
+  '!skills/vault-mind-miner/**'
+)
+$vmTopLevelLeftovers = @(
   '!vault-mind-broadcaster'
   '!vault-mind-heavy-lifter'
   '!vault-mind-manager'
   '!vault-mind-miner'
-)
+) + $vmSkillFilter
 $pkgs = @($pkgs | ForEach-Object {
   $src = if ($_ -is [string]) { $_ } else { $_.source }
   if ($src -eq 'npm:pi-vault-mind') {
@@ -358,7 +386,7 @@ Ok 'vault-mind role skills filtered (prevents forced identity boundary)'
 # A stale top-level "skills" key from an earlier version of this script does
 # nothing but mislead; drop the role patterns if that is all it contains.
 if ($s.PSObject.Properties['skills']) {
-  $leftover = @(@($s.skills) | Where-Object { $_ -notin $vmSkillFilter })
+  $leftover = @(@($s.skills) | Where-Object { $_ -notin $vmTopLevelLeftovers })
   if ($leftover.Count) { $s | Add-Member -NotePropertyName skills -NotePropertyValue $leftover -Force }
   else { $s.PSObject.Properties.Remove('skills'); Warn 'removed ineffective top-level "skills" role patterns' }
 }
@@ -376,6 +404,62 @@ if ($missing.Count) {
          "Your original is intact at $Settings.bak-$Stamp")
 }
 Write-Json $Settings $s
+
+function Patch-VaultMindIdentityLeak {
+  $vmIndex = Join-Path $NpmDir 'node_modules\pi-vault-mind\dist\src\index.js'
+  if (-not (Test-Path $vmIndex)) {
+    Warn 'pi-vault-mind not installed yet; identity-boundary patch skipped until npm install completes'
+    return
+  }
+
+  $text = [System.IO.File]::ReadAllText($vmIndex)
+  $original = $text
+
+  # pi-vault-mind exposes its whole skills directory again through
+  # resources_discover. Package filters do not touch these extension-discovered
+  # paths, so the role skills can reappear even after settings.json is correct.
+  $oldDiscover = @'
+        if (fs.existsSync(skillsDir))
+            paths.push(skillsDir);
+'@
+  $newDiscover = @'
+        if (fs.existsSync(skillsDir)) {
+            for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+                if (!entry.isDirectory())
+                    continue;
+                if (/^vault-mind-(broadcaster|heavy-lifter|manager|miner)$/i.test(entry.name))
+                    continue;
+                const skillFile = path.join(skillsDir, entry.name, "SKILL.md");
+                if (fs.existsSync(skillFile))
+                    paths.push(skillFile);
+            }
+        }
+'@
+  $text = $text.Replace($oldDiscover, $newDiscover)
+
+  # The injector infers role from available skills, not an intentional agent
+  # launch. In a normal session that turns a generic agent into Broadcaster.
+  $oldInjector = @'
+        /* identity boundary injector */
+        registerIdentityInjector(pi);
+'@
+  $newInjector = @'
+        /* identity boundary injector disabled locally: package role skills can be
+         * discoverable in normal sessions and falsely inject Broadcaster/role
+         * boundaries. Re-enable only for intentional isolated role sessions. */
+        // registerIdentityInjector(pi);
+'@
+  $text = $text.Replace($oldInjector, $newInjector)
+
+  if ($text -ne $original) {
+    [System.IO.File]::WriteAllText($vmIndex, $text, $script:Utf8NoBom)
+    Ok 'patched pi-vault-mind dynamic role skill leak'
+  } elseif ($text -match 'registerIdentityInjector\(pi\);') {
+    Warn 'pi-vault-mind identity injector still appears active; package layout may have changed'
+  } else {
+    Ok 'pi-vault-mind identity leak patch already applied'
+  }
+}
 
 # --------------------------------------------------------------------- 5. npm
 # apache-arrow must stay at 18.1.0: LanceDB tables already written under 18
@@ -425,6 +509,12 @@ if (-not $SkipNpm) {
 } else {
   Warn 'Skipped npm install (-SkipNpm)'
 }
+
+# Package install/update can restore pi-vault-mind's dist files, so apply this
+# after npm work every run. If -SkipNpm was used and the package already exists,
+# this still repairs it.
+Step 'Patching pi-vault-mind identity boundary leak'
+Patch-VaultMindIdentityLeak
 
 # ------------------------------------------------------------------ 6. fetch
 # git writes clone/fetch progress to stderr, which PowerShell 5.1 surfaces as
